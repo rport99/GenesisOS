@@ -2830,8 +2830,21 @@ class EcoPacManager(QMainWindow):
         self.init_ui()
         self.apply_tokyo_night_theme()
         
-        self.refresh_packages()
+        #self.refresh_packages()
         
+
+        # Show empty state or just show a welcome message
+        self.status_label.setText("Ready - Search for packages to begin")
+        self.filtered_packages = []
+        self.package_model.set_packages([])
+
+
+
+
+
+
+
+
         # Auto-refresh timer
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.auto_refresh)
@@ -2877,6 +2890,16 @@ class EcoPacManager(QMainWindow):
         # Set minimum size
         self.setMinimumSize(1000, 600)
     
+
+
+
+
+
+
+
+
+
+
     def create_header(self, layout):
         """Create header with Tokyo Night colors."""
         header = QWidget()
@@ -3544,19 +3567,24 @@ class EcoPacManager(QMainWindow):
         QMessageBox.critical(self, "Error", f"Failed to load packages: {error_message}")
     
     def on_search(self):
-        """Handle search - with lazy loading of available packages."""
+        """Handle search - with lazy loading."""
         search_text = self.search_input.text().lower()
         self.searching_aur = self.aur_toggle.isChecked()
         
         if not search_text:
-            # Show all installed packages
-            self.filtered_packages = self.packages
-            self.package_model.set_packages(self.filtered_packages)
-            self.count_label.setText(f"{len(self.filtered_packages)} packages")
-            self.status_label.setText(f"Showing all installed packages")
+            # Show all installed packages IF we have them loaded
+            if self.packages:
+                self.filtered_packages = self.packages
+                self.package_model.set_packages(self.filtered_packages)
+                self.count_label.setText(f"{len(self.filtered_packages)} packages")
+                self.status_label.setText(f"Showing all installed packages")
+            else:
+                # No packages loaded yet
+                self.filtered_packages = []
+                self.package_model.set_packages(self.filtered_packages)
+                self.count_label.setText("0 packages")
+                self.status_label.setText("Enter search terms to find packages")
             return
-        
-        self.status_label.setText(f"Searching for '{search_text}'...")
         
         # Check if user is using aur/ prefix
         force_aur_only = search_text.startswith('aur/')
@@ -3567,11 +3595,13 @@ class EcoPacManager(QMainWindow):
             self.searching_aur = True
             self.aur_toggle.setChecked(True)
         
-        # Show installed packages matching search immediately
-        matching_installed = [
-            pkg for pkg in self.packages
-            if search_text in pkg.name.lower() or search_text in pkg.description.lower()
-        ]
+        # Show installed packages matching search immediately (if we have them loaded)
+        matching_installed = []
+        if self.packages:
+            matching_installed = [
+                pkg for pkg in self.packages
+                if search_text in pkg.name.lower() or search_text in pkg.description.lower()
+            ]
         
         # Filter out AUR packages if toggle is off and not forcing AUR
         if not self.searching_aur and not force_aur_only:
@@ -3587,6 +3617,86 @@ class EcoPacManager(QMainWindow):
         
         # Load available packages in background for search
         self.load_available_packages_for_search(search_text, force_aur_only)
+    
+
+    def perform_search(self, search_text: str):
+        """Perform search on already loaded packages."""
+        # Show installed packages matching search immediately
+        matching_installed = []
+        if self.packages:
+            matching_installed = [
+                pkg for pkg in self.packages
+                if search_text in pkg.name.lower() or search_text in pkg.description.lower()
+            ]
+        
+        # Filter out AUR packages if toggle is off
+        if not self.searching_aur:
+            matching_installed = [pkg for pkg in matching_installed if not pkg.is_aur]
+        
+        # Filter out Flatpak packages if toggle is off
+        if not self.flatpak_toggle.isChecked():
+            matching_installed = [pkg for pkg in matching_installed if not pkg.is_flatpak]
+        
+        self.filtered_packages = matching_installed
+        self.package_model.set_packages(self.filtered_packages)
+        self.count_label.setText(f"{len(self.filtered_packages)} packages")
+        
+        # Load available packages in background for search
+        self.load_available_packages_for_search(search_text, False)
+
+
+    def load_installed_packages_for_search(self, search_text: str):
+        """Load only installed packages needed for search."""
+        self.status_label.setText(f"Loading installed packages for search...")
+        
+        def load_thread():
+            try:
+                # Get minimal package info - ONLY names and versions
+                result = safe_subprocess_run(['pacman', '-Q'], timeout=5)
+                if result.returncode == 0:
+                    packages = []
+                    lines = result.stdout.strip().split('\n')
+                    for line in lines:
+                        if line:
+                            try:
+                                name, version = line.split()
+                                package = Package(
+                                    name=name,
+                                    version=version,
+                                    status=PackageStatus.INSTALLED,
+                                    package_type=PackageType.PACMAN,
+                                    repo='Unknown'  # Default value
+                                )
+                                packages.append(package)
+                            except:
+                                continue
+                    
+                    # Update in main thread
+                    QMetaObject.invokeMethod(self, 'set_installed_packages_and_search',
+                                            Qt.QueuedConnection,
+                                            Q_ARG(list, packages),
+                                            Q_ARG(str, search_text))
+            except Exception as e:
+                logger.error(f"Error loading packages for search: {e}")
+        
+        # Start thread
+        import threading
+        thread = threading.Thread(target=load_thread, daemon=True)
+        thread.start()
+
+    @pyqtSlot(list, str)
+    def set_installed_packages_and_search(self, packages: list, search_text: str):
+        """Set loaded packages and perform search."""
+        self.packages = packages
+        self.perform_search(search_text)
+
+
+
+
+
+
+
+
     
     def load_available_packages_for_search(self, search_text: str, force_aur_only: bool = False):
         """Load available packages matching search in background."""
