@@ -1,4 +1,4 @@
-# stormos-build-files
+# genesisos-build-files
 
 welcome to my build scripts for building StormOS Linux ISO files based on Arch Linux.
 
