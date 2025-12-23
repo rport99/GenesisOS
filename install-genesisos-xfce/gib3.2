@@ -57,17 +57,17 @@ class ArchIsoBuilder(QMainWindow):
     REQUIRED_PACKAGES = [
         'archiso', 'mkinitcpio-archiso',
     ]
-    GIT_REPO = "https://github.com/bfitzgit23/stormos-build-files"
+    GIT_REPO = "https://github.com/rport99/GenesisOS"
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("StormOS ISO Builder v3.2")
+        self.setWindowTitle("GenesisOS ISO Builder v3.2")
         self.setMinimumSize(800, 600)
         
         # Initialize paths
         self.USER_HOME = os.path.expanduser("~")
-        self.STORMOS_DIR = os.path.join(self.USER_HOME, "Desktop", "stormos-build-files", "install-stormos-xfce")
-        self.OUTPUT_DIR = os.path.join(self.USER_HOME, "Desktop", "StormOS-ISO")
+        self.STORMOS_DIR = os.path.join(self.USER_HOME, "Desktop", "genesisos-build-files", "install-genesisos-xfce")
+        self.OUTPUT_DIR = os.path.join(self.USER_HOME, "Desktop", "GenesisOS-ISO")
         self.LOCAL_PACKAGE_DIR = os.path.join(self.STORMOS_DIR, "local_packages")
         
         # State variables
