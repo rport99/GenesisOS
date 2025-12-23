@@ -657,11 +657,11 @@ class FastAddDialog(QDialog):
             ("Package Manager", "eco_pac", "eco_pac"),
             ("System Monitor", "eco_sys", "💻"),
             ("Game Recorder", "eco_rec", "📁"),
-            ("*", "", "🎬"),
-            ("*", "", "⚡"),
-            ("*", "", "⚙️"),
-            ("*", "", "🧮"),
-            ("*", "", "🎨"),
+            ("Lutris", "lutris", ""),
+            ("Steam", "steam", ""),
+            ("BrowserOS", "browseros", ""),
+            ("Firefox", "firefox", "🧮"),
+            ("Rustdesk", "rustdesk", "🎨"),
         ]
         
         for i, (name, cmd, icon) in enumerate(common_apps):
@@ -1688,9 +1688,11 @@ class FloatingMenu(QMainWindow):
             ("Package Manager", "eco_pac", "eco_pac"),
             ("System Monitor", "eco_sys", ""),
             ("Game Recorder", "eco_rec", ""),
-            ("*", "", ""),
-            ("*", "", ""),
-            ("*", "", ""),
+            ("Lutris", "lutris", ""),
+            ("Steam", "steam", ""),
+            ("BrowserOS", "browseros", ""),
+            ("Firefox", "firefox", "🧮"),
+            ("Rustdesk", "rustdesk", "🎨"),
         ]
         
         for name, command, icon in quick_defaults:
