@@ -662,6 +662,8 @@ class FastAddDialog(QDialog):
             ("BrowserOS", "browseros", ""),
             ("Firefox", "firefox", "🧮"),
             ("Rustdesk", "rustdesk", "🎨"),
+            ("Discord", "discord", "🎨"),
+            ("Obs-Studio", "obs", "🎨"),
         ]
         
         for i, (name, cmd, icon) in enumerate(common_apps):
@@ -1693,6 +1695,8 @@ class FloatingMenu(QMainWindow):
             ("BrowserOS", "browseros", ""),
             ("Firefox", "firefox", "🧮"),
             ("Rustdesk", "rustdesk", "🎨"),
+            ("Discord", "discord", "🎨"),
+            ("Obs-Studio", "obs", "🎨"),
         ]
         
         for name, command, icon in quick_defaults:
