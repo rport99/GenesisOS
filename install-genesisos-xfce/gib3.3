@@ -1,0 +1,643 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import subprocess
+import time
+import shutil
+import traceback
+import multiprocessing
+
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QCheckBox, QLabel, QSpinBox, QProgressBar,
+    QTextEdit, QMessageBox, QGroupBox, QGridLayout, QMenu
+)
+from PyQt5.QtCore import Qt, QProcess, pyqtSignal, QObject, QTimer
+from PyQt5.QtGui import QFont, QTextCursor, QPalette, QColor
+
+
+class TerminalProcess(QObject):
+    """Handles terminal operations using QProcess"""
+    output_ready = pyqtSignal(str)
+    error_ready = pyqtSignal(str)
+    process_finished = pyqtSignal(int)
+
+    def __init__(self):
+        super().__init__()
+        self.process = QProcess()
+        self.process.readyReadStandardOutput.connect(self._handle_output)
+        self.process.readyReadStandardError.connect(self._handle_error)
+        self.process.finished.connect(self._handle_finished)
+
+    def run_command(self, command: str, working_dir: str | None = None):
+        self.process.setWorkingDirectory(working_dir or os.path.expanduser("~"))
+        self.output_ready.emit(f"Executing: {command}\n")
+        self.process.start("/bin/bash", ["-c", command])
+
+    def _handle_output(self):
+        data = self.process.readAllStandardOutput().data().decode("utf-8", errors="replace")
+        self.output_ready.emit(data)
+
+    def _handle_error(self):
+        data = self.process.readAllStandardError().data().decode("utf-8", errors="replace")
+        self.error_ready.emit(data)
+
+    def _handle_finished(self, exit_code, exit_status=None):
+        try:
+            self.process_finished.emit(int(exit_code))
+        except Exception:
+            self.process_finished.emit(1)
+
+    def terminate(self):
+        if self.process.state() == QProcess.Running:
+            self.process.terminate()
+
+
+class GenesisOSZenBuilder(QMainWindow):
+    """
+    GenesisOS ISO Builder (Zen)
+    Key behavior:
+      - DOES NOT touch profiledef.sh (never creates/overwrites it)
+      - Merges required items into packages.x86_64 (does not wipe your list)
+      - Only creates pacman.conf if missing (won't overwrite yours)
+      - Builds ISO with mkarchiso
+    """
+
+    REQUIRED_HOST_PACKAGES = [
+        "archiso",
+        "mkinitcpio-archiso",
+        "git",
+        "squashfs-tools",
+    ]
+
+    GIT_REPO = "https://github.com/rport99/GenesisOS"
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("GenesisOS (Zen Kernel) ISO Builder v1.2 (profiledef untouched)")
+        self.setMinimumSize(900, 650)
+
+        # Paths
+        self.USER_HOME = os.path.expanduser("~")
+        self.GENESISOS_DIR = os.path.join(
+            self.USER_HOME, "Desktop", "genesisos-build-files", "install-genesisos-xfce"
+        )
+        self.OUTPUT_DIR = os.path.join(self.USER_HOME, "Desktop", "GenesisOS-ISO")
+        self.LOCAL_PACKAGE_DIR = os.path.join(self.GENESISOS_DIR, "local_packages")
+
+        # State
+        self.root_commands: list[str] = []
+        self.build_in_progress = False
+        self.start_time = 0.0
+        self.all_requirements_met = False
+        self.build_timer = None
+        self.last_output_time = 0.0
+        self.current_progress = 0
+        self.iso_built_successfully = False
+
+        # UI
+        self.setup_ui()
+
+        # Terminal handler
+        self.terminal_process = TerminalProcess()
+        self.terminal_process.output_ready.connect(self.append_terminal_text)
+        self.terminal_process.error_ready.connect(self.append_terminal_text)
+        self.terminal_process.process_finished.connect(self.on_process_finished)
+
+        # Init
+        self.ensure_directories_exist()
+        self.check_and_install_host_packages()
+        self.update_build_button_state()
+
+    # ---------------- UI ----------------
+
+    def setup_ui(self):
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+
+        # Terminal output
+        terminal_group = QGroupBox("Terminal Output")
+        terminal_layout = QVBoxLayout()
+
+        self.terminal = QTextEdit()
+        self.terminal.setFont(QFont("monospace", 10))
+        self.terminal.setReadOnly(True)
+        self.terminal.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.terminal.customContextMenuRequested.connect(self.show_terminal_context_menu)
+        terminal_layout.addWidget(self.terminal)
+
+        terminal_group.setLayout(terminal_layout)
+        main_layout.addWidget(terminal_group)
+
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        main_layout.addWidget(self.progress_bar)
+
+        # Controls
+        controls_group = QGroupBox("Build Controls")
+        controls_layout = QGridLayout()
+
+        self.use_existing_checkbox = QCheckBox("Use existing git clone")
+        self.use_existing_checkbox.setChecked(True)
+        controls_layout.addWidget(self.use_existing_checkbox, 0, 0)
+
+        self.update_git_button = QPushButton("Update Git Clone")
+        self.update_git_button.clicked.connect(self.on_update_git_button_clicked)
+        controls_layout.addWidget(self.update_git_button, 0, 1)
+
+        self.build_button = QPushButton("Build ISO (Zen)")
+        self.build_button.clicked.connect(self.on_build_button_clicked)
+        controls_layout.addWidget(self.build_button, 0, 2)
+
+        self.open_iso_button = QPushButton("Open ISO Folder")
+        self.open_iso_button.clicked.connect(self.open_iso_folder)
+        self.open_iso_button.setEnabled(False)
+        controls_layout.addWidget(self.open_iso_button, 0, 3)
+
+        controls_layout.addWidget(QLabel("Processors:"), 1, 0)
+        cpu_count = multiprocessing.cpu_count()
+        self.processor_spinbox = QSpinBox()
+        self.processor_spinbox.setRange(1, cpu_count)
+        self.processor_spinbox.setValue(cpu_count)
+        controls_layout.addWidget(self.processor_spinbox, 1, 1)
+
+        controls_group.setLayout(controls_layout)
+        main_layout.addWidget(controls_group)
+
+        self.statusBar().showMessage("Ready")
+
+    def show_terminal_context_menu(self, position):
+        menu = QMenu()
+        copy_action = menu.addAction("Copy")
+        paste_action = menu.addAction("Paste")
+
+        copy_action.setEnabled(self.terminal.textCursor().hasSelection())
+
+        action = menu.exec_(self.terminal.mapToGlobal(position))
+        if action == copy_action:
+            self.terminal.copy()
+        elif action == paste_action:
+            self.terminal.paste()
+
+    def append_terminal_text(self, text: str):
+        self.terminal.moveCursor(QTextCursor.End)
+        self.terminal.insertPlainText(text)
+        self.terminal.ensureCursorVisible()
+
+        lines = text.strip().split("\n")
+        if lines and lines[-1].strip():
+            msg = lines[-1].strip()
+            self.statusBar().showMessage(msg[:70] + "..." if len(msg) > 70 else msg)
+
+        if text.strip():
+            self.last_output_time = time.time()
+
+        try:
+            with open(os.path.join(self.USER_HOME, "genesisos_zen_build.log"), "a", encoding="utf-8") as log:
+                log.write(text)
+        except Exception:
+            pass
+
+    # ---------------- Setup / checks ----------------
+
+    def ensure_directories_exist(self):
+        self.append_terminal_text("Checking if necessary directories exist...\n")
+        os.makedirs(self.OUTPUT_DIR, exist_ok=True)
+        os.makedirs(self.GENESISOS_DIR, exist_ok=True)
+        os.makedirs(self.LOCAL_PACKAGE_DIR, exist_ok=True)
+
+        # Helpful for UEFI/systemd-boot profiles (doesn't overwrite anything)
+        os.makedirs(os.path.join(self.GENESISOS_DIR, "efiboot", "loader", "entries"), exist_ok=True)
+
+        self.append_terminal_text(f"Output directory: {self.OUTPUT_DIR}\n")
+        self.append_terminal_text(f"Profile directory: {self.GENESISOS_DIR}\n")
+        self.append_terminal_text(f"Local package directory: {self.LOCAL_PACKAGE_DIR}\n")
+
+    def check_and_install_host_packages(self):
+        self.append_terminal_text("Checking required host packages...\n")
+        missing = []
+        for pkg in self.REQUIRED_HOST_PACKAGES:
+            if not self.is_package_installed(pkg):
+                missing.append(pkg)
+
+        if missing:
+            for pkg in missing:
+                cmd = f"pacman -S --needed --noconfirm {pkg}"
+                self.root_commands.append(cmd)
+                self.append_terminal_text(f"Queued command: {cmd}\n")
+            self.append_terminal_text("Missing host packages queued for installation.\n")
+            self.all_requirements_met = False
+        else:
+            self.append_terminal_text("All required host packages are already installed.\n")
+            self.all_requirements_met = True
+
+    def is_package_installed(self, package_name: str) -> bool:
+        try:
+            result = subprocess.run(
+                ["pacman", "-Qs", package_name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            installed = package_name in result.stdout
+            self.append_terminal_text(
+                f"Package '{package_name}' is {'already installed' if installed else 'NOT installed'}.\n"
+            )
+            return installed
+        except Exception as e:
+            self.append_terminal_text(f"Error checking package {package_name}: {e}\n")
+            return False
+
+    def update_build_button_state(self):
+        self.build_button.setEnabled(self.all_requirements_met)
+        if not self.all_requirements_met:
+            self.build_button.setToolTip("Build disabled: missing required host packages")
+            self.append_terminal_text("Build button disabled due to missing requirements.\n")
+        else:
+            self.build_button.setToolTip("Start building the ISO with Zen kernel")
+            self.append_terminal_text("All requirements met. Build button enabled.\n")
+
+    # ---------------- Git ----------------
+
+    def on_update_git_button_clicked(self):
+        if self.build_in_progress:
+            self.show_error_dialog("Operation in Progress", "Cannot update Git while build is running.")
+            return
+        self.append_terminal_text("Updating Git clone...\n")
+        self.clone_or_update_git_repo(force_update=True)
+
+    def clone_or_update_git_repo(self, force_update=False):
+        use_existing = self.use_existing_checkbox.isChecked()
+        repo_parent_dir = os.path.dirname(self.GENESISOS_DIR)
+
+        if not use_existing or force_update:
+            if os.path.exists(repo_parent_dir):
+                self.append_terminal_text("Deleting existing repository folder to download a fresh copy...\n")
+                try:
+                    shutil.rmtree(repo_parent_dir)
+                except Exception as e:
+                    self.append_terminal_text(f"Error removing existing repository: {e}\n")
+                    return
+
+            os.makedirs(repo_parent_dir, exist_ok=True)
+            self.append_terminal_text(f"Cloning repository from {self.GIT_REPO}...\n")
+            self.terminal_process.run_command(f"git clone --progress {self.GIT_REPO} '{repo_parent_dir}'")
+        else:
+            self.append_terminal_text("Using existing Git clone. No update needed.\n")
+
+    # ---------------- Profile scan (NO profiledef changes) ----------------
+
+    def scan_genesisos_dir(self):
+        """
+        Enforce essentials but DO NOT create/overwrite profiledef.sh (user-managed).
+        """
+        self.append_terminal_text(f"Scanning {self.GENESISOS_DIR}...\n")
+
+        # Merge packages list safely
+        self.create_required_file("packages.x86_64")
+
+        # Never touch profiledef.sh
+        prof = os.path.join(self.GENESISOS_DIR, "profiledef.sh")
+        if os.path.exists(prof):
+            self.append_terminal_text("profiledef.sh exists — leaving it unchanged.\n")
+        else:
+            self.append_terminal_text("WARNING: profiledef.sh is missing! mkarchiso will fail.\n")
+
+        # pacman.conf: create only if missing
+        pac_conf = os.path.join(self.GENESISOS_DIR, "pacman.conf")
+        if not os.path.exists(pac_conf):
+            self.create_required_file("pacman.conf")
+        else:
+            self.append_terminal_text("pacman.conf exists — leaving it unchanged.\n")
+
+        self.append_terminal_text("Profile scan complete (profiledef untouched).\n")
+
+    def create_required_file(self, filename: str):
+        """
+        Create/repair required files.
+        HARD BLOCK: never touch profiledef.sh from this builder.
+        """
+        if filename == "profiledef.sh":
+            self.append_terminal_text("Skipping profiledef.sh (never modified by this builder).\n")
+            return
+
+        try:
+            if filename == "packages.x86_64":
+                path = os.path.join(self.GENESISOS_DIR, "packages.x86_64")
+
+                # These prevent common archiso build issues and your earlier prompts/errors.
+                required = [
+                    # zen kernel stack
+                    "linux-zen",
+                    "linux-zen-headers",
+                    "linux-firmware",
+
+                    # ensure archiso mkinitcpio hook exists inside ISO
+                    "mkinitcpio",
+                    "mkinitcpio-archiso",
+
+                    # helps avoid provider prompts / mismatches (optional but recommended)
+                    "iptables-nft",
+
+                    # if you want GRUB-based installs, keep these in your own list too
+                    # "grub", "grub-efi-x86_64", "efibootmgr",
+                ]
+
+                existing = []
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line or line.startswith("#"):
+                                continue
+                            existing.append(line)
+
+                # Ensure base is present
+                if "base" not in existing:
+                    existing.insert(0, "base")
+
+                # Remove non-zen kernels (zen-only ISO)
+                remove = {"linux", "linux-lts", "linux-hardened"}
+                existing = [p for p in existing if p not in remove]
+
+                # Add required items if missing
+                for p in required:
+                    if p not in existing:
+                        existing.append(p)
+
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(existing) + "\n")
+
+                self.append_terminal_text("Merged required packages into packages.x86_64 (no wipe).\n")
+
+            elif filename == "pacman.conf":
+                default_pacman_conf = "/etc/pacman.conf"
+                dst = os.path.join(self.GENESISOS_DIR, "pacman.conf")
+
+                if os.path.exists(default_pacman_conf):
+                    shutil.copy(default_pacman_conf, dst)
+                    self.append_terminal_text("Created pacman.conf from /etc/pacman.conf.\n")
+                else:
+                    with open(dst, "w", encoding="utf-8") as f:
+                        f.write("[options]\nHoldPkg = pacman glibc\nArchitecture = auto\n\n")
+                        f.write("[core]\nInclude = /etc/pacman.d/mirrorlist\n\n")
+                        f.write("[extra]\nInclude = /etc/pacman.d/mirrorlist\n\n")
+                        f.write("[multilib]\nInclude = /etc/pacman.d/mirrorlist\n")
+                    self.append_terminal_text("Created minimal pacman.conf.\n")
+
+        except Exception as e:
+            self.append_terminal_text(f"Error creating file {filename}: {e}\n")
+
+    # ---------------- Build ----------------
+
+    def on_build_button_clicked(self):
+        if not self.all_requirements_met:
+            self.show_error_dialog(
+                "Missing Requirements",
+                "Cannot start build. Missing required host packages. Check terminal output.",
+            )
+            return
+
+        if self.build_in_progress:
+            reply = QMessageBox.question(
+                self,
+                "Build in Progress",
+                "A build is already in progress. Do you want to cancel it?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self.terminal_process.terminate()
+                self.build_in_progress = False
+                self.append_terminal_text("Build cancelled by user.\n")
+                self.progress_bar.setValue(0)
+                if self.build_timer:
+                    self.build_timer.stop()
+            return
+
+        self.append_terminal_text("Starting GenesisOS ISO build (Zen)...\n")
+        self.build_in_progress = True
+        self.start_time = time.time()
+        self.last_output_time = time.time()
+        self.current_progress = 0
+        self.iso_built_successfully = False
+        self.open_iso_button.setEnabled(False)
+
+        self.build_iso()
+
+        self.build_timer = QTimer(self)
+        self.build_timer.timeout.connect(self.monitor_build_progress)
+        self.build_timer.start(1000)
+
+    def monitor_build_progress(self):
+        if not self.build_in_progress:
+            if self.build_timer:
+                self.build_timer.stop()
+            return
+
+        if self.terminal_process.process.state() == QProcess.Running:
+            elapsed = time.time() - self.start_time
+            time_progress = min(90, int((elapsed / 1800) * 100))
+
+            if time.time() - self.last_output_time < 5:
+                self.current_progress = min(95, self.current_progress + 1)
+            else:
+                pulse = int((time.time() % 4) * 25)
+                self.current_progress = max(time_progress, pulse)
+
+            self.progress_bar.setValue(self.current_progress)
+        else:
+            if self.build_timer:
+                self.build_timer.stop()
+
+    def clean_up_previous_build(self):
+        self.append_terminal_text("Cleaning up previous build files...\n")
+
+        work_dir = os.path.join(self.OUTPUT_DIR, "work")
+        if os.path.exists(work_dir):
+            cmd = f"rm -rf '{work_dir}'"
+            self.root_commands.append(cmd)
+            self.append_terminal_text(f"Queued removal of work directory: {work_dir}\n")
+
+        if os.path.exists(self.OUTPUT_DIR):
+            for name in os.listdir(self.OUTPUT_DIR):
+                if name.endswith(".iso"):
+                    path = os.path.join(self.OUTPUT_DIR, name)
+                    cmd = f"rm -f '{path}'"
+                    self.root_commands.append(cmd)
+                    self.append_terminal_text(f"Queued removal of old ISO file: {path}\n")
+
+    def build_iso(self):
+        try:
+            self.progress_bar.setValue(0)
+            self.clean_up_previous_build()
+
+            # Ensure profile essentials (profiledef untouched)
+            self.scan_genesisos_dir()
+
+            self.append_terminal_text("Starting mkarchiso build process...\n")
+
+            work_dir = os.path.join(self.OUTPUT_DIR, "work")
+            os.makedirs(work_dir, exist_ok=True)
+
+            processors = int(self.processor_spinbox.value())
+            cpu_list = ",".join(map(str, range(processors)))
+            self.append_terminal_text(f"Using {processors} processor(s). CPU affinity: {cpu_list}\n")
+
+            mksquashfs_options = f"-processors {processors}"
+            mkarchiso_command = (
+                f"export MKSQUASHFS_OPTIONS='{mksquashfs_options}'; "
+                f"taskset -c {cpu_list} mkarchiso -v -w '{work_dir}' "
+                f"-o '{self.OUTPUT_DIR}' '{self.GENESISOS_DIR}'"
+            )
+            self.root_commands.append(mkarchiso_command)
+            self.append_terminal_text(f"Queued build command: {mkarchiso_command}\n")
+
+            # Root script
+            script_path = os.path.join(self.USER_HOME, "build.sh")
+            with open(script_path, "w", encoding="utf-8") as s:
+                s.write("#!/bin/bash\n")
+                s.write("set -e\n")
+                s.write("set -x\n")
+                for cmd in self.root_commands:
+                    s.write(cmd + "\n")
+            os.chmod(script_path, 0o755)
+
+            self.append_terminal_text(f"Build script created at: {script_path}\n")
+            self.append_terminal_text(f"Executing build script: pkexec bash '{script_path}'\n")
+
+            self.terminal_process.run_command(f"pkexec bash '{script_path}'")
+            self.root_commands.clear()
+
+        except Exception:
+            err = traceback.format_exc()
+            self.append_terminal_text(f"Unexpected error:\n{err}\n")
+            self.show_error_dialog("Unexpected Error", err)
+            self.build_in_progress = False
+            if self.build_timer:
+                self.build_timer.stop()
+
+    def on_process_finished(self, exit_code: int):
+        if not self.build_in_progress:
+            return
+
+        self.append_terminal_text(f"Process completed with exit code: {exit_code}\n")
+        if self.build_timer:
+            self.build_timer.stop()
+
+        end_time = time.time()
+
+        if exit_code == 0:
+            self.append_terminal_text("Build process completed successfully.\n")
+            iso_files = [f for f in os.listdir(self.OUTPUT_DIR) if f.endswith(".iso")]
+            if iso_files:
+                iso_path = os.path.join(self.OUTPUT_DIR, iso_files[0])
+                self.append_terminal_text(f"ISO located at: {iso_path}\n")
+                self.progress_bar.setValue(100)
+                self.iso_built_successfully = True
+                self.open_iso_button.setEnabled(True)
+            else:
+                self.append_terminal_text("Build completed, but no ISO file found.\n")
+                self.progress_bar.setValue(0)
+        else:
+            self.append_terminal_text("Build process failed.\n")
+            self.show_error_dialog("Build Failed", "Build process failed. Check terminal output.")
+            self.progress_bar.setValue(0)
+
+        total = end_time - self.start_time
+        minutes, seconds = divmod(total, 60)
+        self.append_terminal_text(f"Total build time: {int(minutes)} minutes and {int(seconds)} seconds.\n")
+
+        self.build_in_progress = False
+
+    # ---------------- Helpers ----------------
+
+    def open_iso_folder(self):
+        try:
+            subprocess.run(["xdg-open", self.OUTPUT_DIR], check=False)
+        except Exception as e:
+            self.append_terminal_text(f"Failed to open folder: {e}\n")
+
+    def show_error_dialog(self, title, message):
+        QMessageBox.critical(self, title, message)
+
+    def closeEvent(self, event):
+        if self.build_in_progress:
+            reply = QMessageBox.question(
+                self,
+                "Build in Progress",
+                "A build is in progress. Are you sure you want to quit?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply == QMessageBox.No:
+                event.ignore()
+                return
+            self.terminal_process.terminate()
+            if self.build_timer:
+                self.build_timer.stop()
+        event.accept()
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor(53, 53, 53))
+    palette.setColor(QPalette.WindowText, Qt.white)
+    palette.setColor(QPalette.Base, QColor(25, 25, 25))
+    palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
+    palette.setColor(QPalette.ToolTipBase, Qt.white)
+    palette.setColor(QPalette.ToolTipText, Qt.white)
+    palette.setColor(QPalette.Text, Qt.white)
+    palette.setColor(QPalette.Button, QColor(53, 53, 53))
+    palette.setColor(QPalette.ButtonText, Qt.white)
+    palette.setColor(QPalette.BrightText, Qt.red)
+    palette.setColor(QPalette.Link, QColor(42, 130, 218))
+    palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
+    palette.setColor(QPalette.HighlightedText, Qt.black)
+    app.setPalette(palette)
+
+    app.setStyleSheet("""
+        QToolTip {
+            color: #ffffff;
+            background-color: #2a82da;
+            border: 1px solid white;
+        }
+        QGroupBox {
+            border: 1px solid #555555;
+            margin-top: 10px;
+            color: white;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 3px 0 3px;
+            color: white;
+        }
+        QPushButton {
+            background-color: #2d2d2d;
+            border: 1px solid #555555;
+            padding: 6px 10px;
+            color: white;
+            min-width: 100px;
+        }
+        QPushButton:hover:!pressed {
+            background-color: #3a3a3a;
+        }
+        QPushButton:pressed {
+            background-color: #4a4a4a;
+        }
+        QPushButton:disabled {
+            background-color: #353535;
+            color: #606060;
+            border: 1px solid #444444;
+        }
+    """)
+
+    window = GenesisOSZenBuilder()
+    window.show()
+    sys.exit(app.exec_())
