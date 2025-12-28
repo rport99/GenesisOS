@@ -819,7 +819,7 @@ class FastAddDialog(QDialog):
         common_apps = [
             ("Package Manager", "eco_pac", ""),
             ("System Monitor", "eco_sys", ""),
-            ("Game Recorder", "eco_rec", ""),
+            ("Game Recorder", "eco_rec2", ""),
             ("Lutris", "lutris", ""),
             ("Steam", "steam", ""),
             ("BrowserOS", "browseros", ""),
@@ -1659,7 +1659,7 @@ class FloatingMenu(QMainWindow):
         quick_defaults = [
             ("Package Manager", "eco_pac", ""),
             ("System Monitor", "eco_sys", ""),
-            ("Game Recorder", "eco_rec", ""),
+            ("Game Recorder", "eco_rec2", ""),
             ("Lutris", "lutris", ""),
             ("Steam", "steam", ""),
             ("BrowserOS", "browseros", ""),

@@ -39,6 +39,7 @@ file_permissions=(
   ["/usr/local/bin/autoi"]="0:0:755"
   ["/usr/local/bin/eco_menu"]="0:0:755"
   ["/usr/local/bin/eco_sys"]="0:0:755"
-  ["/usr/local/bin/eco_rec"]="0:0:755"
+  ["/usr/local/bin/eco_rec2"]="0:0:755"
+  ["/usr/local/bin/eco_nvidia"]="0:0:755"
   ["/usr/local/bin/eco_pac"]="0:0:755"
 )
