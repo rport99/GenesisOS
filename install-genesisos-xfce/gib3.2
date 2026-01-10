@@ -1,639 +1,885 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+GenesisOS ISO Builder — Rebuild (PyQt5) — Safer / Cleaner / More Robust
+Single-file app.
+
+What’s fixed/improved vs your original:
+- Requirements check uses `pacman -Q` (accurate), not `pacman -Qs`
+- Missing requirements now have an **Install Requirements** button that actually runs pkexec
+- Git handling is safer: clone into a dedicated repo dir; update uses `git -C ... pull`
+- Build is cleanly cancellable
+- Paths are configurable (profile dir + output dir) with UI
+- Better logging + “Open Log” button
+- Less destructive defaults (won’t auto-delete unless you confirm)
+
+Added (per your request):
+- Optional checkbox: delete OUTPUT_DIR/work after build completes (success or fail)
+- Safe guardrails so it ONLY deletes the exact "work" folder inside OUTPUT_DIR
+
+Default layout/paths match your original intent:
+- Repo dir:   ~/Desktop/genesisos-build-files   (git clone target)
+- Profile:    ~/Desktop/genesisos-build-files/install-genesisos-xfce
+- Output dir: ~/Desktop/GenesisOS-ISO
+- Log file:   ~/stormos_build.log
+"""
 
 import os
 import sys
-import subprocess
 import time
 import shutil
 import traceback
 import multiprocessing
+import subprocess
+from pathlib import Path
 from datetime import datetime
 
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                            QPushButton, QCheckBox, QLabel, QSpinBox, QProgressBar, 
-                            QTextEdit, QMessageBox, QGroupBox, QGridLayout, QMenu)
-from PyQt5.QtCore import Qt, QProcess, pyqtSignal, QObject, QTimer, QPoint
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QCheckBox, QLabel, QSpinBox, QProgressBar, QTextEdit,
+    QMessageBox, QGroupBox, QGridLayout, QMenu, QFileDialog, QLineEdit,
+    QToolButton
+)
+from PyQt5.QtCore import Qt, QProcess, pyqtSignal, QObject, QTimer
 from PyQt5.QtGui import QFont, QTextCursor, QPalette, QColor
 
+
+def now_ts() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def shlex_quote(s: str) -> str:
+    # Minimal quoting (safe enough for paths we control)
+    return "'" + s.replace("'", "'\"'\"'") + "'"
+
+
+def cmd_exists(cmd: str) -> bool:
+    return shutil.which(cmd) is not None
+
+
 class TerminalProcess(QObject):
-    """Handles terminal operations in a separate thread"""
+    """Single QProcess wrapper that streams output to UI (no-freeze)."""
     output_ready = pyqtSignal(str)
     error_ready = pyqtSignal(str)
     process_finished = pyqtSignal(int)
-    
+
     def __init__(self):
         super().__init__()
         self.process = QProcess()
+        self.process.setProcessChannelMode(QProcess.SeparateChannels)
         self.process.readyReadStandardOutput.connect(self._handle_output)
         self.process.readyReadStandardError.connect(self._handle_error)
         self.process.finished.connect(self._handle_finished)
-    
-    def run_command(self, command, working_dir=None):
-        """Execute a command in the terminal"""
-        self.process.setWorkingDirectory(working_dir if working_dir else os.path.expanduser("~"))
-        self.output_ready.emit(f"Executing: {command}\n")
-        self.process.start("/bin/bash", ["-c", command])
-    
+
+    def run_command(self, command: str, working_dir: str = None):
+        wd = working_dir if working_dir else os.path.expanduser("~")
+        self.process.setWorkingDirectory(wd)
+        self.output_ready.emit(f"\n[{now_ts()}] $ {command}\n")
+        self.process.start("/bin/bash", ["-lc", command])
+
     def _handle_output(self):
-        """Handle standard output"""
-        data = self.process.readAllStandardOutput().data().decode('utf-8')
-        self.output_ready.emit(data)
-    
+        data = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        if data:
+            self.output_ready.emit(data)
+
     def _handle_error(self):
-        """Handle standard error"""
-        data = self.process.readAllStandardError().data().decode('utf-8')
-        self.error_ready.emit(data)
-    
-    def _handle_finished(self, exit_code):
-        """Handle process completion"""
-        self.process_finished.emit(exit_code)
-    
+        data = bytes(self.process.readAllStandardError()).decode("utf-8", errors="replace")
+        if data:
+            self.error_ready.emit(data)
+
+    def _handle_finished(self, exit_code: int, _exit_status=None):
+        self.process_finished.emit(int(exit_code))
+
     def terminate(self):
-        """Terminate the running process"""
         if self.process.state() == QProcess.Running:
+            self.output_ready.emit(f"\n[{now_ts()}] !!! Terminating process...\n")
             self.process.terminate()
+            # last resort kill after short grace
+            QTimer.singleShot(2500, self._kill_if_needed)
+
+    def _kill_if_needed(self):
+        if self.process.state() == QProcess.Running:
+            self.output_ready.emit(f"[{now_ts()}] !!! Kill (still running)\n")
+            self.process.kill()
+
 
 class ArchIsoBuilder(QMainWindow):
-    REQUIRED_PACKAGES = [
-        'archiso', 'mkinitcpio-archiso',
-    ]
+    REQUIRED_PACKAGES = ["archiso", "mkinitcpio-archiso"]
     GIT_REPO = "https://github.com/rport99/GenesisOS"
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GenesisOS ISO Builder v3.2")
-        self.setMinimumSize(800, 600)
-        
-        # Initialize paths
-        self.USER_HOME = os.path.expanduser("~")
-        self.STORMOS_DIR = os.path.join(self.USER_HOME, "Desktop", "genesisos-build-files", "install-genesisos-xfce")
+
+        self.setWindowTitle("TornadoOS ISO Builder (Rebuild)")
+        self.setMinimumSize(900, 650)
+
+        # --- Defaults (match your original intent) ---
+        self.USER_HOME = str(Path.home())
+        self.REPO_DIR = os.path.join(self.USER_HOME, "Desktop", "genesisos-build-files")
+        self.PROFILE_DIR = os.path.join(self.REPO_DIR, "install-genesisos-xfce")
         self.OUTPUT_DIR = os.path.join(self.USER_HOME, "Desktop", "GenesisOS-ISO")
-        self.LOCAL_PACKAGE_DIR = os.path.join(self.STORMOS_DIR, "local_packages")
-        
-        # State variables
-        self.root_commands = []
+        self.LOG_PATH = os.path.join(self.USER_HOME, "stormos_build.log")
+
+        # internal state
         self.build_in_progress = False
-        self.start_time = 0
-        self.all_requirements_met = False
-        self.build_timer = None
-        self.last_output_time = 0
+        self.start_time = 0.0
+        self.last_output_time = 0.0
         self.current_progress = 0
         self.iso_built_successfully = False
-        
-        # Setup UI
-        self.setup_ui()
-        
-        # Initialize terminal process handler
+        self.all_requirements_met = False
+        self.build_timer: QTimer | None = None
+        self.active_job = None  # "build" | "git" | "reqs" | None
+
+        # process
         self.terminal_process = TerminalProcess()
         self.terminal_process.output_ready.connect(self.append_terminal_text)
         self.terminal_process.error_ready.connect(self.append_terminal_text)
         self.terminal_process.process_finished.connect(self.on_process_finished)
-        
-        # Initialize directories
-        self.ensure_directories_exist()
-        
-        # Check packages after UI is ready
-        self.check_and_install_packages()
-        
-        # Enable build button only if all requirements are met
-        self.update_build_button_state()
 
+        self.setup_ui()
+        self.ensure_directories_exist()
+        self.check_requirements()
+        self.update_buttons_state(initial=True)
+
+        # Small auto-hint if repo missing
+        if not os.path.isdir(self.REPO_DIR) or not os.path.isdir(os.path.join(self.REPO_DIR, ".git")):
+            self.append_terminal_text(
+                f"[{now_ts()}] Repo not found at {self.REPO_DIR}\n"
+                f"          Use “Fresh Clone” to download: {self.GIT_REPO}\n"
+            )
+
+    # ---------------- UI ----------------
     def setup_ui(self):
-        """Create and arrange the UI elements"""
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        
+        central = QWidget()
+        self.setCentralWidget(central)
+        main = QVBoxLayout(central)
+        main.setContentsMargins(10, 10, 10, 10)
+        main.setSpacing(10)
+
+        # Paths group
+        paths_group = QGroupBox("Paths")
+        paths_layout = QGridLayout()
+        paths_layout.setHorizontalSpacing(10)
+        paths_layout.setVerticalSpacing(8)
+
+        self.repo_edit = QLineEdit(self.REPO_DIR)
+        self.profile_edit = QLineEdit(self.PROFILE_DIR)
+        self.output_edit = QLineEdit(self.OUTPUT_DIR)
+
+        self.repo_edit.setReadOnly(True)
+        self.profile_edit.setReadOnly(True)
+        self.output_edit.setReadOnly(True)
+
+        choose_profile_btn = QToolButton()
+        choose_profile_btn.setText("Choose Profile…")
+        choose_profile_btn.clicked.connect(self.choose_profile_dir)
+
+        choose_output_btn = QToolButton()
+        choose_output_btn.setText("Choose Output…")
+        choose_output_btn.clicked.connect(self.choose_output_dir)
+
+        paths_layout.addWidget(QLabel("Repo dir:"), 0, 0)
+        paths_layout.addWidget(self.repo_edit, 0, 1, 1, 3)
+
+        paths_layout.addWidget(QLabel("Profile dir:"), 1, 0)
+        paths_layout.addWidget(self.profile_edit, 1, 1, 1, 2)
+        paths_layout.addWidget(choose_profile_btn, 1, 3)
+
+        paths_layout.addWidget(QLabel("Output dir:"), 2, 0)
+        paths_layout.addWidget(self.output_edit, 2, 1, 1, 2)
+        paths_layout.addWidget(choose_output_btn, 2, 3)
+
+        paths_group.setLayout(paths_layout)
+        main.addWidget(paths_group)
+
         # Terminal output
-        terminal_group = QGroupBox("Terminal Output")
-        terminal_layout = QVBoxLayout()
-        
+        term_group = QGroupBox("Terminal Output")
+        term_layout = QVBoxLayout()
+        term_layout.setContentsMargins(8, 8, 8, 8)
+
         self.terminal = QTextEdit()
         self.terminal.setFont(QFont("monospace", 10))
         self.terminal.setReadOnly(True)
         self.terminal.setContextMenuPolicy(Qt.CustomContextMenu)
         self.terminal.customContextMenuRequested.connect(self.show_terminal_context_menu)
-        terminal_layout.addWidget(self.terminal)
-        
-        terminal_group.setLayout(terminal_layout)
-        main_layout.addWidget(terminal_group)
-        
+
+        term_layout.addWidget(self.terminal)
+        term_group.setLayout(term_layout)
+        main.addWidget(term_group, 1)
+
         # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        main_layout.addWidget(self.progress_bar)
-        
-        # Controls section
+        main.addWidget(self.progress_bar)
+
+        # Controls group
         controls_group = QGroupBox("Build Controls")
-        controls_layout = QGridLayout()
-        
-        # Git options
-        self.use_existing_checkbox = QCheckBox("Use existing git clone")
+        controls = QGridLayout()
+        controls.setHorizontalSpacing(10)
+        controls.setVerticalSpacing(8)
+
+        self.use_existing_checkbox = QCheckBox("Use existing git clone (don’t reclone)")
         self.use_existing_checkbox.setChecked(True)
-        controls_layout.addWidget(self.use_existing_checkbox, 0, 0)
-        
-        self.update_git_button = QPushButton("Update Git Clone")
-        self.update_git_button.clicked.connect(self.on_update_git_button_clicked)
-        controls_layout.addWidget(self.update_git_button, 0, 1)
-        
-        # Build button
+
+        # NEW: delete work after build
+        self.delete_work_after_checkbox = QCheckBox("Delete output work/ folder after build (clean)")
+        self.delete_work_after_checkbox.setChecked(True)
+
+        self.fresh_clone_button = QPushButton("Fresh Clone")
+        self.fresh_clone_button.clicked.connect(self.on_fresh_clone)
+
+        self.update_git_button = QPushButton("Update (git pull)")
+        self.update_git_button.clicked.connect(self.on_update_git)
+
+        self.install_reqs_button = QPushButton("Install Requirements")
+        self.install_reqs_button.clicked.connect(self.on_install_requirements)
+
         self.build_button = QPushButton("Build ISO")
-        self.build_button.clicked.connect(self.on_build_button_clicked)
-        controls_layout.addWidget(self.build_button, 0, 2)
-        
-        # Open ISO Folder button
+        self.build_button.clicked.connect(self.on_build_clicked)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.on_cancel_clicked)
+        self.cancel_button.setEnabled(False)
+
         self.open_iso_button = QPushButton("Open ISO Folder")
         self.open_iso_button.clicked.connect(self.open_iso_folder)
         self.open_iso_button.setEnabled(False)
-        controls_layout.addWidget(self.open_iso_button, 0, 3)
-        
-        # Processor selection
-        controls_layout.addWidget(QLabel("Processors:"), 1, 0)
-        
+
+        self.open_log_button = QPushButton("Open Log")
+        self.open_log_button.clicked.connect(self.open_log)
+
+        # Layout (keep it readable)
+        # Row 0: options + ops
+        controls.addWidget(self.use_existing_checkbox, 0, 0, 1, 3)
+        controls.addWidget(self.fresh_clone_button, 0, 3)
+        controls.addWidget(self.update_git_button, 0, 4)
+        controls.addWidget(self.install_reqs_button, 0, 5)
+
+        # Row 1: cleanup option
+        controls.addWidget(self.delete_work_after_checkbox, 1, 0, 1, 3)
+
+        # Row 2: log + processors + build buttons
+        controls.addWidget(self.open_log_button, 2, 0)
+
+        controls.addWidget(QLabel("Processors:"), 2, 1)
         cpu_count = multiprocessing.cpu_count()
         self.processor_spinbox = QSpinBox()
-        self.processor_spinbox.setRange(1, cpu_count)
-        self.processor_spinbox.setValue(cpu_count)
-        controls_layout.addWidget(self.processor_spinbox, 1, 1)
-        
-        controls_group.setLayout(controls_layout)
-        main_layout.addWidget(controls_group)
-        
-        # Status bar
+        self.processor_spinbox.setRange(1, max(1, cpu_count))
+        self.processor_spinbox.setValue(max(1, cpu_count))
+        controls.addWidget(self.processor_spinbox, 2, 2)
+
+        controls.addWidget(self.build_button, 2, 3)
+        controls.addWidget(self.cancel_button, 2, 4)
+        controls.addWidget(self.open_iso_button, 2, 5)
+
+        controls_group.setLayout(controls)
+        main.addWidget(controls_group)
+
         self.statusBar().showMessage("Ready")
 
+    # ---------------- Terminal / Logging ----------------
     def show_terminal_context_menu(self, position):
-        """Show context menu for terminal with copy/paste options"""
         menu = QMenu()
+
         copy_action = menu.addAction("Copy")
-        paste_action = menu.addAction("Paste")
-        
+        select_all_action = menu.addAction("Select All")
+        clear_action = menu.addAction("Clear")
+        menu.addSeparator()
+        open_log_action = menu.addAction("Open Log")
+        reveal_log_action = menu.addAction("Reveal Log Folder")
+
         cursor = self.terminal.textCursor()
-        has_selection = cursor.hasSelection()
-        copy_action.setEnabled(has_selection)
-        
+        copy_action.setEnabled(cursor.hasSelection())
+
         action = menu.exec_(self.terminal.mapToGlobal(position))
-        
+
         if action == copy_action:
             self.terminal.copy()
-        elif action == paste_action:
-            self.terminal.paste()
+        elif action == select_all_action:
+            self.terminal.selectAll()
+        elif action == clear_action:
+            self.terminal.clear()
+        elif action == open_log_action:
+            self.open_log()
+        elif action == reveal_log_action:
+            try:
+                subprocess.run(["xdg-open", os.path.dirname(self.LOG_PATH)], check=False)
+            except Exception:
+                pass
 
-    def append_terminal_text(self, text):
-        """Append text to the terminal widget and log to a file"""
+    def append_terminal_text(self, text: str):
         self.terminal.moveCursor(QTextCursor.End)
         self.terminal.insertPlainText(text)
         self.terminal.ensureCursorVisible()
-        
-        lines = text.strip().split('\n')
+
+        # status bar hint
+        lines = [ln for ln in text.splitlines() if ln.strip()]
         if lines:
-            self.statusBar().showMessage(lines[-1][:50] + "..." if len(lines[-1]) > 50 else lines[-1])
-        
+            last = lines[-1].strip()
+            self.statusBar().showMessage(last[:80] + ("…" if len(last) > 80 else ""))
+
         if text.strip():
             self.last_output_time = time.time()
-        
+
         try:
-            with open(os.path.join(self.USER_HOME, 'stormos_build.log'), 'a') as log_file:
-                log_file.write(text)
-        except Exception as e:
-            print(f"Error writing to log file: {e}")
+            with open(self.LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(text)
+        except Exception:
+            # don't crash UI for logging errors
+            pass
+
+    # ---------------- Paths / Setup ----------------
+    def refresh_path_edits(self):
+        self.repo_edit.setText(self.REPO_DIR)
+        self.profile_edit.setText(self.PROFILE_DIR)
+        self.output_edit.setText(self.OUTPUT_DIR)
 
     def ensure_directories_exist(self):
-        """Ensure that OUTPUT_DIR and STORMOS_DIR exist, create them if necessary"""
-        self.append_terminal_text("Checking if necessary directories exist...\n")
-        
-        if not os.path.exists(self.OUTPUT_DIR):
-            os.makedirs(self.OUTPUT_DIR, exist_ok=True)
-            self.append_terminal_text(f"Created output directory: {self.OUTPUT_DIR}\n")
-        
-        if not os.path.exists(self.STORMOS_DIR):
-            os.makedirs(self.STORMOS_DIR, exist_ok=True)
-            self.append_terminal_text(f"Created StormOS directory: {self.STORMOS_DIR}\n")
-        
-        if not os.path.exists(self.LOCAL_PACKAGE_DIR):
-            os.makedirs(self.LOCAL_PACKAGE_DIR, exist_ok=True)
-            self.append_terminal_text(f"Created local package directory: {self.LOCAL_PACKAGE_DIR}\n")
+        Path(self.OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+        self.append_terminal_text(f"[{now_ts()}] Output dir: {self.OUTPUT_DIR}\n")
 
-    def check_and_install_packages(self):
-        """Check if required packages are installed and collect missing ones to install later"""
-        self.append_terminal_text("Checking required packages...\n")
-        missing_packages = []
-        
-        for package in self.REQUIRED_PACKAGES:
-            if not self.is_package_installed(package):
-                missing_packages.append(package)
-        
-        if missing_packages:
-            self.install_missing_packages(missing_packages)
-            self.all_requirements_met = False
-        else:
-            self.append_terminal_text("All required packages are already installed.\n")
-            self.all_requirements_met = True
+    def choose_profile_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Select mkarchiso profile folder", self.PROFILE_DIR)
+        if d:
+            self.PROFILE_DIR = d
+            # repo dir becomes parent if it looks like a git repo
+            maybe_repo = os.path.dirname(d)
+            if os.path.isdir(os.path.join(maybe_repo, ".git")):
+                self.REPO_DIR = maybe_repo
+            self.refresh_path_edits()
+            self.append_terminal_text(f"[{now_ts()}] Profile set to: {self.PROFILE_DIR}\n")
+            self.scan_profile_dir()
+            self.update_buttons_state()
 
-    def is_package_installed(self, package_name):
-        """Check if a package is installed using pacman"""
+    def choose_output_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Select output folder", self.OUTPUT_DIR)
+        if d:
+            self.OUTPUT_DIR = d
+            self.refresh_path_edits()
+            self.ensure_directories_exist()
+            self.append_terminal_text(f"[{now_ts()}] Output set to: {self.OUTPUT_DIR}\n")
+
+    # ---------------- Requirements ----------------
+    def is_package_installed(self, pkg: str) -> bool:
+        if not cmd_exists("pacman"):
+            return False
         try:
-            result = subprocess.run(['pacman', '-Qs', package_name], 
-                                   capture_output=True, text=True, timeout=10)
-            installed = package_name in result.stdout
-            if installed:
-                self.append_terminal_text(f"Package '{package_name}' is already installed.\n")
-            else:
-                self.append_terminal_text(f"Package '{package_name}' is NOT installed.\n")
-            return installed
-        except subprocess.TimeoutExpired:
-            self.append_terminal_text(f"Timeout while checking package: {package_name}\n")
-            return False
-        except Exception as e:
-            self.append_terminal_text(f"Error checking package {package_name}: {str(e)}\n")
+            # pacman -Q returns 0 if installed
+            cp = subprocess.run(["pacman", "-Q", pkg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            return cp.returncode == 0
+        except Exception:
             return False
 
-    def install_missing_packages(self, packages):
-        """Collect the command to install missing packages"""
-        for package in packages:
-            if package == 'calamares-git':
-                local_zst = os.path.join(self.LOCAL_PACKAGE_DIR, f"{package}.zst")
-                if os.path.exists(local_zst):
-                    self.append_terminal_text(f"Installing '{package}' from local file: {local_zst}\n")
-                    command = f"pacman -U '{local_zst}' --noconfirm"
-                else:
-                    self.append_terminal_text(f"Local package file for '{package}' not found. Attempting to install from repository.\n")
-                    command = f"pacman -S --needed --noconfirm {package}"
-            else:
-                self.append_terminal_text(f"Installing package from repository: {package}\n")
-                command = f"pacman -S --needed --noconfirm {package}"
-            
-            self.root_commands.append(command)
-            self.append_terminal_text(f"Queued command: {command}\n")
-        
-        self.append_terminal_text("Missing packages have been queued for installation.\n")
-
-    def update_build_button_state(self):
-        """Enable or disable the build button based on requirements"""
-        self.build_button.setEnabled(self.all_requirements_met)
-        if not self.all_requirements_met:
-            self.build_button.setToolTip("Build disabled: Missing required components")
-            self.append_terminal_text("Build button disabled due to missing requirements.\n")
-        else:
-            self.build_button.setToolTip("Start building the ISO")
-            self.append_terminal_text("All requirements met. Build button enabled.\n")
-
-    def recheck_requirements(self):
-        """Re-check if required packages are installed after build"""
-        self.append_terminal_text("Re-checking requirements after build...\n")
-        missing_packages = []
-        
-        for package in self.REQUIRED_PACKAGES:
-            if not self.is_package_installed(package):
-                missing_packages.append(package)
-        
-        if not missing_packages:
-            self.all_requirements_met = True
-            self.append_terminal_text("All required packages are now installed.\n")
-        else:
+    def check_requirements(self):
+        self.append_terminal_text(f"[{now_ts()}] Checking requirements…\n")
+        missing = [p for p in self.REQUIRED_PACKAGES if not self.is_package_installed(p)]
+        if missing:
             self.all_requirements_met = False
-            self.append_terminal_text(f"Still missing packages: {', '.join(missing_packages)}\n")
-        
-        self.update_build_button_state()
-
-    def on_update_git_button_clicked(self):
-        """Handler for the 'Update Git Clone' button"""
-        if self.build_in_progress:
-            self.show_error_dialog("Operation in Progress", 
-                                  "Cannot update Git repository while a build is in progress.")
-            return
-            
-        self.append_terminal_text("Updating Git clone...\n")
-        self.clone_or_update_git_repo(force_update=True)
-
-    def clone_or_update_git_repo(self, force_update=False):
-        """Clone or update the git repository"""
-        use_existing = self.use_existing_checkbox.isChecked()
-        
-        if not use_existing or force_update:
-            repo_parent_dir = os.path.dirname(self.STORMOS_DIR)
-            
-            if os.path.exists(repo_parent_dir):
-                self.append_terminal_text("Deleting existing repository to download a fresh copy...\n")
-                try:
-                    shutil.rmtree(repo_parent_dir)
-                except Exception as e:
-                    self.append_terminal_text(f"Error removing existing repository: {str(e)}\n")
-                    return
-            
-            self.append_terminal_text(f"Cloning repository from {self.GIT_REPO}...\n")
-            command = f"git clone --progress {self.GIT_REPO} '{repo_parent_dir}'"
-            self.terminal_process.run_command(command)
+            self.append_terminal_text(f"[{now_ts()}] Missing: {', '.join(missing)}\n")
+            self.append_terminal_text("          Click “Install Requirements” to install via pkexec.\n")
         else:
-            self.append_terminal_text("Using existing Git clone. No update needed.\n")
+            self.all_requirements_met = True
+            self.append_terminal_text(f"[{now_ts()}] Requirements OK.\n")
 
-    def scan_stormos_dir(self):
-        """Scan the StormOS directory for necessary files and folders"""
-        self.append_terminal_text(f"Scanning {self.STORMOS_DIR} for necessary files and folders...\n")
+    def on_install_requirements(self):
+        if self.build_in_progress:
+            self.show_error("Busy", "Cannot install requirements while another operation is running.")
+            return
+        missing = [p for p in self.REQUIRED_PACKAGES if not self.is_package_installed(p)]
+        if not missing:
+            self.append_terminal_text(f"[{now_ts()}] Nothing to install. Requirements already met.\n")
+            self.check_requirements()
+            self.update_buttons_state()
+            return
+
+        msg = (
+            "This will run pacman as root to install:\n\n"
+            f"  {', '.join(missing)}\n\n"
+            "Continue?"
+        )
+        if QMessageBox.question(self, "Install Requirements", msg, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+
+        script = self._write_root_script(
+            title="install_reqs",
+            lines=[
+                "set -euo pipefail",
+                "echo '[REQS] Installing required packages…'",
+                f"pacman -S --needed --noconfirm {' '.join(missing)}",
+                "echo '[REQS] Done.'",
+            ],
+        )
+        self.active_job = "reqs"
+        self.run_root_script(script)
+
+    # ---------------- Git ----------------
+    def repo_is_clone(self) -> bool:
+        return os.path.isdir(os.path.join(self.REPO_DIR, ".git"))
+
+    def on_fresh_clone(self):
+        if self.build_in_progress:
+            self.show_error("Busy", "Cannot clone while another operation is running.")
+            return
+
+        if os.path.exists(self.REPO_DIR) and os.listdir(self.REPO_DIR):
+            msg = (
+                "Fresh Clone will DELETE the existing repo folder:\n\n"
+                f"  {self.REPO_DIR}\n\n"
+                "This is destructive for that folder.\n\nContinue?"
+            )
+            if QMessageBox.warning(self, "Confirm Fresh Clone", msg, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+                return
+
+            try:
+                shutil.rmtree(self.REPO_DIR)
+            except Exception as e:
+                self.append_terminal_text(f"[{now_ts()}] Failed to remove repo dir: {e}\n")
+                self.show_error("Delete Failed", f"Could not delete:\n{self.REPO_DIR}\n\n{e}")
+                return
+
+        Path(os.path.dirname(self.REPO_DIR)).mkdir(parents=True, exist_ok=True)
+        self.append_terminal_text(f"[{now_ts()}] Cloning repo…\n")
+        self.active_job = "git"
+        self.terminal_process.run_command(f"git clone --progress {shlex_quote(self.GIT_REPO)} {shlex_quote(self.REPO_DIR)}")
+
+    def on_update_git(self):
+        if self.build_in_progress:
+            self.show_error("Busy", "Cannot update while another operation is running.")
+            return
+        if not self.repo_is_clone():
+            self.show_error("No Repo", f"Repo not found as a git clone:\n{self.REPO_DIR}\n\nUse Fresh Clone first.")
+            return
+
+        self.append_terminal_text(f"[{now_ts()}] Updating repo (git pull)…\n")
+        self.active_job = "git"
+        self.terminal_process.run_command(f"git -C {shlex_quote(self.REPO_DIR)} pull --rebase --autostash")
+
+    # ---------------- Profile scan (mkarchiso files) ----------------
+    def scan_profile_dir(self):
+        self.append_terminal_text(f"[{now_ts()}] Scanning profile: {self.PROFILE_DIR}\n")
         required_files = ["packages.x86_64", "profiledef.sh", "pacman.conf"]
         required_dirs = ["syslinux", "grub"]
-        
-        for required_file in required_files:
-            file_path = os.path.join(self.STORMOS_DIR, required_file)
-            if not os.path.exists(file_path):
-                self.append_terminal_text(f"Missing: {required_file}. Creating default...\n")
-                self.create_required_file(required_file)
-            else:
-                self.append_terminal_text(f"Found: {required_file}\n")
-        
-        for required_dir in required_dirs:
-            dir_path = os.path.join(self.STORMOS_DIR, required_dir)
-            if not os.path.exists(dir_path):
-                self.append_terminal_text(f"Missing: {required_dir} directory. Creating it...\n")
-                os.makedirs(dir_path, exist_ok=True)
-                self.create_required_file(required_dir)
-            else:
-                self.append_terminal_text(f"Found: {required_dir} directory\n")
 
-    def create_required_file(self, filename):
-        """Create required files with proper directory structure"""
+        for rf in required_files:
+            fp = os.path.join(self.PROFILE_DIR, rf)
+            if os.path.exists(fp):
+                self.append_terminal_text(f"  ✓ Found file: {rf}\n")
+            else:
+                self.append_terminal_text(f"  ! Missing file: {rf} (will create minimal default)\n")
+                self.create_required_file(rf)
+
+        for rd in required_dirs:
+            dp = os.path.join(self.PROFILE_DIR, rd)
+            if os.path.isdir(dp):
+                self.append_terminal_text(f"  ✓ Found dir: {rd}/\n")
+            else:
+                self.append_terminal_text(f"  ! Missing dir: {rd}/ (will create minimal)\n")
+                os.makedirs(dp, exist_ok=True)
+                self.create_required_file(rd)
+
+    def create_required_file(self, name: str):
         try:
-            if filename == "packages.x86_64":
-                with open(os.path.join(self.STORMOS_DIR, "packages.x86_64"), "w") as f:
-                    f.write("base\nlinux\nlinux-firmware\nsyslinux\n")
-            
-            elif filename == "pacman.conf":
-                default_pacman_conf = "/etc/pacman.conf"
-                if os.path.exists(default_pacman_conf):
-                    shutil.copy(default_pacman_conf, os.path.join(self.STORMOS_DIR, "pacman.conf"))
+            os.makedirs(self.PROFILE_DIR, exist_ok=True)
+
+            if name == "packages.x86_64":
+                p = os.path.join(self.PROFILE_DIR, "packages.x86_64")
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write("base\nlinux\nlinux-firmware\narchiso\nmkinitcpio\nsyslinux\ngrub\n")
+                self.append_terminal_text(f"    → Created {p}\n")
+
+            elif name == "pacman.conf":
+                src = "/etc/pacman.conf"
+                dst = os.path.join(self.PROFILE_DIR, "pacman.conf")
+                if os.path.exists(src):
+                    shutil.copy(src, dst)
+                    self.append_terminal_text(f"    → Copied {src} -> {dst}\n")
                 else:
-                    self.append_terminal_text(f"Default pacman.conf not found at {default_pacman_conf}.\n")
-            
-            elif filename == "syslinux":
-                syslinux_dir = os.path.join(self.STORMOS_DIR, "syslinux")
-                os.makedirs(syslinux_dir, exist_ok=True)
-                with open(os.path.join(syslinux_dir, "syslinux.cfg"), "w") as f:
-                    f.write(
-                        "DEFAULT linux\n"
-                        "LABEL linux\n"
-                        "    LINUX /boot/vmlinuz-linux\n"
-                        "    INITRD /boot/initramfs-linux.img\n"
-                        "    APPEND root=/dev/sda1 rw\n"
-                    )
-            
-            elif filename == "grub":
-                grub_dir = os.path.join(self.STORMOS_DIR, "grub")
-                os.makedirs(grub_dir, exist_ok=True)
-                with open(os.path.join(grub_dir, "grub.cfg"), "w") as f:
-                    f.write(
-                        "set default=0\n"
-                        "set timeout=5\n\n"
-                        "menuentry 'Arch Linux' {\n"
-                        "    linux /boot/vmlinuz-linux root=/dev/sda1 rw\n"
-                        "    initrd /boot/initramfs-linux.img\n"
-                        "}\n"
-                    )
-            
-            elif filename == "profiledef.sh":
-                profiledef_path = os.path.join(self.STORMOS_DIR, "profiledef.sh")
-                with open(profiledef_path, "w") as f:
+                    with open(dst, "w", encoding="utf-8") as f:
+                        f.write("[options]\nHoldPkg = pacman glibc\nArchitecture = auto\n")
+                    self.append_terminal_text(f"    → Created minimal {dst}\n")
+
+            elif name == "profiledef.sh":
+                p = os.path.join(self.PROFILE_DIR, "profiledef.sh")
+                with open(p, "w", encoding="utf-8") as f:
                     f.write(
                         "#!/bin/bash\n"
-                        "iso_name=\"stormos\"\n"
-                        "iso_label=\"STORMOS_$(date +%Y%m)\"\n"
+                        "iso_name=\"genesisos\"\n"
+                        "iso_label=\"GENESISOS_$(date +%Y%m)\"\n"
                         "iso_version=\"$(date +%Y.%m.%d)\"\n"
+                        "install_dir=\"genesisos\"\n"
+                        "buildmodes=('iso')\n"
+                        "bootmodes=('bios.syslinux.mbr' 'bios.syslinux.eltorito'\n"
+                        "          'uefi-x64.systemd-boot.esp'\n"
+                        "          'uefi-x64.systemd-boot.eltorito')\n"
                     )
-                os.chmod(profiledef_path, 0o755)
-            
-            self.append_terminal_text(f"Created required file: {filename}\n")
-        
-        except Exception as e:
-            self.append_terminal_text(f"Error creating file {filename}: {str(e)}\n")
+                os.chmod(p, 0o755)
+                self.append_terminal_text(f"    → Created {p}\n")
 
-    def generate_generic_calamares_config(self):
-        """Generate a generic Calamares configuration"""
-        self.append_terminal_text("Generating generic Calamares configuration...\n")
-        
-        generic_config = """
----
-# Calamares Generic Config
-modules:
-  - welcome
-  - locale
-  - keyboard
-  - partition
-  - users
-  - summary
-  - finished
-"""
-        calamares_dir = os.path.join(self.STORMOS_DIR, 'calamares')
-        os.makedirs(calamares_dir, exist_ok=True)
-        
-        try:
-            with open(os.path.join(calamares_dir, 'settings.conf'), 'w') as f:
-                f.write(generic_config)
-            self.append_terminal_text("Generic Calamares configuration generated successfully.\n")
-        except Exception as e:
-            self.append_terminal_text(f"Error generating Calamares config: {str(e)}\n")
+            elif name == "syslinux":
+                d = os.path.join(self.PROFILE_DIR, "syslinux")
+                os.makedirs(d, exist_ok=True)
+                p = os.path.join(d, "syslinux.cfg")
+                if not os.path.exists(p):
+                    with open(p, "w", encoding="utf-8") as f:
+                        f.write(
+                            "DEFAULT arch\n"
+                            "PROMPT 0\n"
+                            "TIMEOUT 50\n\n"
+                            "LABEL arch\n"
+                            "    LINUX /%INSTALL_DIR%/boot/x86_64/vmlinuz-linux\n"
+                            "    INITRD /%INSTALL_DIR%/boot/x86_64/initramfs-linux.img\n"
+                            "    APPEND archisobasedir=%INSTALL_DIR% archisolabel=%ARCHISO_LABEL%\n"
+                        )
+                    self.append_terminal_text(f"    → Created {p}\n")
 
-    def on_build_button_clicked(self):
-        """Handler for the 'Build ISO' button"""
-        if not self.all_requirements_met:
-            self.show_error_dialog("Missing Requirements", 
-                                  "Cannot start build. Missing required components. Please check the terminal output for details.")
-            return
-            
+            elif name == "grub":
+                d = os.path.join(self.PROFILE_DIR, "grub")
+                os.makedirs(d, exist_ok=True)
+                p = os.path.join(d, "grub.cfg")
+                if not os.path.exists(p):
+                    with open(p, "w", encoding="utf-8") as f:
+                        f.write(
+                            "set default=0\n"
+                            "set timeout=5\n\n"
+                            "menuentry 'GenesisOS (x86_64)' {\n"
+                            "  linux /%INSTALL_DIR%/boot/x86_64/vmlinuz-linux archisobasedir=%INSTALL_DIR% archisolabel=%ARCHISO_LABEL%\n"
+                            "  initrd /%INSTALL_DIR%/boot/x86_64/initramfs-linux.img\n"
+                            "}\n"
+                        )
+                    self.append_terminal_text(f"    → Created {p}\n")
+
+        except Exception as e:
+            self.append_terminal_text(f"[{now_ts()}] Error creating {name}: {e}\n")
+
+    # ---------------- Build ----------------
+    def on_build_clicked(self):
         if self.build_in_progress:
-            reply = QMessageBox.question(self, "Build in Progress", 
-                                       "A build is already in progress. Do you want to cancel it?",
-                                       QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                self.terminal_process.terminate()
-                self.build_in_progress = False
-                self.append_terminal_text("Build process cancelled by user.\n")
-                self.progress_bar.setValue(0)
-                if self.build_timer:
-                    self.build_timer.stop()
             return
-        
-        self.append_terminal_text("Starting ISO build...\n")
+
+        self.check_requirements()
+        if not self.all_requirements_met:
+            self.update_buttons_state()
+            self.show_error(
+                "Missing Requirements",
+                "Required packages are missing.\n\nClick “Install Requirements” first.\n\nSee Terminal Output for details."
+            )
+            return
+
+        if not cmd_exists("mkarchiso"):
+            self.show_error("mkarchiso not found", "mkarchiso is not available in PATH. Is archiso installed correctly?")
+            return
+
+        # Ensure profile exists
+        if not os.path.isdir(self.PROFILE_DIR):
+            self.show_error("Profile Missing", f"Profile folder not found:\n{self.PROFILE_DIR}")
+            return
+
+        # Optional git sanity
+        if (not self.use_existing_checkbox.isChecked()) and (not self.repo_is_clone()):
+            self.show_error("Repo Missing", "Repo is not a git clone. Use Fresh Clone first.")
+            return
+
+        # pre-scan to create missing minimal files
+        self.scan_profile_dir()
+
+        # Confirm
+        msg = (
+            "Build ISO now?\n\n"
+            f"Profile:\n  {self.PROFILE_DIR}\n\n"
+            f"Output:\n  {self.OUTPUT_DIR}\n\n"
+            "This will run mkarchiso as root via pkexec."
+        )
+        if QMessageBox.question(self, "Confirm Build", msg, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+
+        self.iso_built_successfully = False
+        self.open_iso_button.setEnabled(False)
+
         self.build_in_progress = True
+        self.active_job = "build"
         self.start_time = time.time()
         self.last_output_time = time.time()
         self.current_progress = 0
-        self.build_iso()
-        
+        self.progress_bar.setValue(0)
+        self.update_buttons_state()
+
+        # Clean previous build
+        self.clean_previous_build()
+
+        # Build script
+        work_dir = os.path.join(self.OUTPUT_DIR, "work")
+        os.makedirs(work_dir, exist_ok=True)
+
+        processors = int(self.processor_spinbox.value())
+        mksquashfs_opts = f"-processors {processors}"
+
+        script = self._write_root_script(
+            title="mkarchiso_build",
+            lines=[
+                "set -euo pipefail",
+                "echo '[BUILD] Starting mkarchiso…'",
+                f"export MKSQUASHFS_OPTIONS={shlex_quote(mksquashfs_opts)}",
+                f"echo '[BUILD] MKSQUASHFS_OPTIONS='\"$MKSQUASHFS_OPTIONS\"",
+                f"mkdir -p {shlex_quote(work_dir)}",
+                f"mkarchiso -v -w {shlex_quote(work_dir)} -o {shlex_quote(self.OUTPUT_DIR)} {shlex_quote(self.PROFILE_DIR)}",
+                "echo '[BUILD] Done.'",
+            ],
+        )
+
+        # Launch
+        self.run_root_script(script)
+
+        # progress timer
         self.build_timer = QTimer(self)
-        self.build_timer.timeout.connect(self.monitor_build_progress)
+        self.build_timer.timeout.connect(self.monitor_progress)
         self.build_timer.start(1000)
 
-    def monitor_build_progress(self):
-        """Monitor the build progress and update the progress bar"""
+    def on_cancel_clicked(self):
+        if not self.build_in_progress:
+            return
+        if QMessageBox.question(self, "Cancel", "Cancel the current operation?", QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        self.terminal_process.terminate()
+
+    def monitor_progress(self):
         if not self.build_in_progress:
             if self.build_timer:
                 self.build_timer.stop()
             return
-            
+
         if self.terminal_process.process.state() == QProcess.Running:
-            current_time = time.time()
-            elapsed = current_time - self.start_time
-            time_progress = min(90, int((elapsed / 1800) * 100))
-            
-            if current_time - self.last_output_time < 5:
-                self.current_progress = min(95, self.current_progress + 1)
+            now = time.time()
+            elapsed = now - self.start_time
+
+            # Soft progress: 0..90 based on time up to 30 min, plus activity bumps to 95
+            time_progress = min(90, int((elapsed / 1800.0) * 100))
+
+            if now - self.last_output_time < 3:
+                self.current_progress = min(95, max(self.current_progress, time_progress) + 1)
             else:
-                pulse = int((current_time % 4) * 25)
-                self.current_progress = max(time_progress, pulse)
-            
-            self.progress_bar.setValue(self.current_progress)
-            
-            if current_time - self.last_output_time > 60:
-                self.append_terminal_text("Build process seems to be taking longer than expected. This is normal for large builds.\n")
+                # pulse if no output
+                pulse = int((now % 4) * 25)
+                self.current_progress = max(time_progress, min(90, pulse))
+
+            self.progress_bar.setValue(max(0, min(100, self.current_progress)))
+
+            if now - self.last_output_time > 60:
+                self.append_terminal_text(f"[{now_ts()}] (No output for 60s — build may still be working, this can be normal.)\n")
         else:
             if self.build_timer:
                 self.build_timer.stop()
 
-    def clean_up_previous_build(self):
-        """Clean up previous build files"""
-        self.append_terminal_text("Cleaning up previous build files...\n")
-        
-        work_dir = os.path.join(self.OUTPUT_DIR, 'work')
+    def clean_previous_build(self):
+        self.append_terminal_text(f"[{now_ts()}] Cleaning previous build artifacts…\n")
+
+        work_dir = os.path.join(self.OUTPUT_DIR, "work")
         if os.path.exists(work_dir):
-            command = f"rm -rf '{work_dir}'"
-            self.root_commands.append(command)
-            self.append_terminal_text(f"Queued removal of work directory: {work_dir}\n")
-        
-        if os.path.exists(self.OUTPUT_DIR):
-            for file_name in os.listdir(self.OUTPUT_DIR):
-                if file_name.endswith('.iso'):
-                    file_path = os.path.join(self.OUTPUT_DIR, file_name)
-                    command = f"rm -f '{file_path}'"
-                    self.root_commands.append(command)
-                    self.append_terminal_text(f"Queued removal of old ISO file: {file_path}\n")
+            try:
+                shutil.rmtree(work_dir)
+                self.append_terminal_text(f"  Removed work dir: {work_dir}\n")
+            except Exception as e:
+                self.append_terminal_text(f"  Failed removing work dir: {e}\n")
 
-    def build_iso(self):
-        """Build the ISO image"""
+        # remove old ISOs
         try:
-            self.progress_bar.setValue(0)
-            self.clean_up_previous_build()
-            self.scan_stormos_dir()
-            
-            self.append_terminal_text("Starting mkarchiso build process...\n")
-            self.append_terminal_text("This may take a while depending on your system performance...\n")
-            
-            work_dir = os.path.join(self.OUTPUT_DIR, 'work')
-            os.makedirs(work_dir, exist_ok=True)
-            
-            processors = int(self.processor_spinbox.value())
-            self.append_terminal_text(f"Using {processors} processor(s) for the build process.\n")
-            
-            cpu_list = ",".join(map(str, range(processors)))
-            self.append_terminal_text(f"CPU Affinity set to CPUs: {cpu_list}\n")
-            
-            mksquashfs_options = f"-processors {processors}"
-            mkarchiso_command = (
-                f"export MKSQUASHFS_OPTIONS='{mksquashfs_options}'; "
-                f"taskset -c {cpu_list} mkarchiso -v -w '{work_dir}' "
-                f"-o '{self.OUTPUT_DIR}' '{self.STORMOS_DIR}'"
-            )
-            self.root_commands.append(mkarchiso_command)
-            self.append_terminal_text(f"Queued build command: {mkarchiso_command}\n")
-            
-            script_path = os.path.join(self.USER_HOME, 'build.sh')
-            with open(script_path, 'w') as script_file:
-                script_file.write('#!/bin/bash\n')
-                script_file.write('set -e\n')
-                script_file.write('set -x\n')
-                for cmd in self.root_commands:
-                    script_file.write(f"{cmd}\n")
-                    if 'pacman -U' in cmd:
-                        package_name = cmd.split("'")[1].replace('.zst', '')
-                    elif 'pacman -S' in cmd:
-                        package_name = cmd.split()[-1]
-                    else:
-                        package_name = None
-                    if package_name:
-                        script_file.write(f"pacman -Qs {package_name} > /dev/null || {{ echo \"Error: Package '{package_name}' failed to install.\"; exit 1; }}\n")
-            os.chmod(script_path, 0o755)
-            self.append_terminal_text(f"Build script created at: {script_path}\n")
-            
-            command = f"pkexec bash '{script_path}'"
-            self.append_terminal_text(f"Executing build script with command: {command}\n")
-            self.terminal_process.run_command(command)
-            self.root_commands.clear()
-        
-        except Exception as e:
-            error_message = traceback.format_exc()
-            self.append_terminal_text(f"An unexpected error occurred: {error_message}\n")
-            self.show_error_dialog("Unexpected Error", error_message)
-            self.build_in_progress = False
-            if self.build_timer:
-                self.build_timer.stop()
+            for fn in os.listdir(self.OUTPUT_DIR):
+                if fn.lower().endswith(".iso"):
+                    p = os.path.join(self.OUTPUT_DIR, fn)
+                    try:
+                        os.remove(p)
+                        self.append_terminal_text(f"  Removed old ISO: {p}\n")
+                    except Exception as e:
+                        self.append_terminal_text(f"  Failed removing {p}: {e}\n")
+        except Exception:
+            pass
 
-    def on_process_finished(self, exit_code):
-        """Called when a process in the terminal has completed"""
-        if not self.build_in_progress:
-            return
-            
-        self.append_terminal_text(f"Process completed with exit code: {exit_code}\n")
-        
+    # NEW: Safe cleanup after build (only OUTPUT_DIR/work)
+    def cleanup_work_dir_after_build(self):
+        """
+        Safely remove OUTPUT_DIR/work after a build completes.
+        Refuses to delete anything outside OUTPUT_DIR, and only deletes the exact 'work' dir.
+        """
+        try:
+            out_real = os.path.realpath(self.OUTPUT_DIR)
+            work_dir = os.path.join(self.OUTPUT_DIR, "work")
+            work_real = os.path.realpath(work_dir)
+
+            # Must be exactly: <OUTPUT_DIR>/work
+            if os.path.basename(work_real) != "work":
+                self.append_terminal_text(f"[{now_ts()}] Refusing to delete (not named 'work'): {work_real}\n")
+                return
+            if not work_real.startswith(out_real + os.sep):
+                self.append_terminal_text(f"[{now_ts()}] Refusing to delete (outside output dir): {work_real}\n")
+                return
+
+            if os.path.exists(work_real):
+                shutil.rmtree(work_real)
+                self.append_terminal_text(f"[{now_ts()}] Cleaned work dir after build: {work_real}\n")
+            else:
+                self.append_terminal_text(f"[{now_ts()}] No work dir to clean: {work_real}\n")
+
+        except Exception as e:
+            self.append_terminal_text(f"[{now_ts()}] Failed to clean work dir after build: {e}\n")
+
+    def _write_root_script(self, title: str, lines: list[str]) -> str:
+        # Put scripts in /tmp for root execution; also keep a user-readable copy name
+        safe_title = "".join(ch for ch in title if ch.isalnum() or ch in ("_", "-")).strip() or "script"
+        script_path = os.path.join("/tmp", f"genesisos_iso_builder_{safe_title}.sh")
+
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write("#!/bin/bash\n")
+            f.write("set -x\n")
+            for ln in lines:
+                f.write(ln + "\n")
+
+        os.chmod(script_path, 0o755)
+        self.append_terminal_text(f"[{now_ts()}] Root script written: {script_path}\n")
+        return script_path
+
+    def run_root_script(self, script_path: str):
+        # pkexec uses GUI prompt; keep output streaming through QProcess
+        cmd = f"pkexec bash {shlex_quote(script_path)}"
+        self.append_terminal_text(f"[{now_ts()}] Running as root via pkexec…\n")
+        self.terminal_process.run_command(cmd)
+
+    # ---------------- Process finished ----------------
+    def on_process_finished(self, exit_code: int):
+        # stop timer
         if self.build_timer:
             self.build_timer.stop()
-        
-        end_time = time.time()
-        
-        if exit_code == 0:
-            self.append_terminal_text("Build process completed successfully.\n")
-            iso_files = [f for f in os.listdir(self.OUTPUT_DIR) if f.endswith('.iso')]
-            if iso_files:
-                iso_path = os.path.join(self.OUTPUT_DIR, iso_files[0])
-                self.append_terminal_text(f"ISO build completed successfully. ISO located at: {iso_path}\n")
-                self.progress_bar.setValue(100)
-                self.iso_built_successfully = True
-                self.open_iso_button.setEnabled(True)
+
+        self.append_terminal_text(f"\n[{now_ts()}] Process finished (exit={exit_code})\n")
+
+        # interpret job
+        job = self.active_job
+        self.active_job = None
+
+        if job == "reqs":
+            self.check_requirements()
+            if self.all_requirements_met:
+                self.append_terminal_text(f"[{now_ts()}] Requirements installed successfully.\n")
             else:
-                self.append_terminal_text("Build completed, but no ISO file found.\n")
+                self.append_terminal_text(f"[{now_ts()}] Still missing requirements.\n")
+
+        elif job == "git":
+            # After clone/update, re-point profile if it exists
+            default_profile = os.path.join(self.REPO_DIR, "install-genesisos-xfce")
+            if os.path.isdir(default_profile):
+                self.PROFILE_DIR = default_profile
+                self.refresh_path_edits()
+                self.append_terminal_text(f"[{now_ts()}] Profile set to: {self.PROFILE_DIR}\n")
+            if exit_code == 0:
+                self.append_terminal_text(f"[{now_ts()}] Git operation complete.\n")
+            else:
+                self.append_terminal_text(f"[{now_ts()}] Git operation failed.\n")
+
+        elif job == "build":
+            end_time = time.time()
+            total = max(0.0, end_time - self.start_time)
+            mins, secs = divmod(int(total), 60)
+
+            if exit_code == 0:
+                self.progress_bar.setValue(100)
+                self.append_terminal_text(f"[{now_ts()}] Build SUCCESS.\n")
+
+                iso_files = []
+                try:
+                    iso_files = [f for f in os.listdir(self.OUTPUT_DIR) if f.lower().endswith(".iso")]
+                except Exception:
+                    iso_files = []
+
+                if iso_files:
+                    iso_files.sort(key=lambda fn: os.path.getmtime(os.path.join(self.OUTPUT_DIR, fn)))
+                    iso_path = os.path.join(self.OUTPUT_DIR, iso_files[-1])
+                    self.append_terminal_text(f"[{now_ts()}] ISO: {iso_path}\n")
+                    self.iso_built_successfully = True
+                    self.open_iso_button.setEnabled(True)
+                else:
+                    self.append_terminal_text(f"[{now_ts()}] Build ended OK, but no ISO found in output dir.\n")
+                    self.iso_built_successfully = False
+                    self.open_iso_button.setEnabled(False)
+            else:
                 self.progress_bar.setValue(0)
-            self.recheck_requirements()
-        else:
-            self.append_terminal_text("Build process failed due to package installation errors.\n")
-            self.append_terminal_text("Please check the terminal output for details.\n")
-            self.show_error_dialog("Build Failed", "One or more packages failed to install. Please check the terminal output for details.")
-            self.progress_bar.setValue(0)
-        
-        total_time = end_time - self.start_time
-        minutes, seconds = divmod(total_time, 60)
-        self.append_terminal_text(f"Total build time: {int(minutes)} minutes and {int(seconds)} seconds.\n")
-        
+                self.append_terminal_text(f"[{now_ts()}] Build FAILED.\n")
+                self.show_error("Build Failed", "mkarchiso returned a non-zero exit code.\n\nCheck Terminal Output / Log.")
+
+            self.append_terminal_text(f"[{now_ts()}] Total time: {mins} min {secs} sec\n")
+
+            # NEW: delete work dir AFTER build finishes (success OR fail) if enabled
+            try:
+                if self.delete_work_after_checkbox.isChecked():
+                    self.cleanup_work_dir_after_build()
+            except Exception:
+                pass
+
+        # reset UI state
         self.build_in_progress = False
+        self.update_buttons_state()
 
+    # ---------------- Buttons state ----------------
+    def update_buttons_state(self, initial: bool = False):
+        busy = self.build_in_progress or (self.terminal_process.process.state() == QProcess.Running)
+
+        self.cancel_button.setEnabled(busy)
+
+        # allow git/req operations only when idle
+        allow_ops = not busy
+        self.fresh_clone_button.setEnabled(allow_ops)
+        self.update_git_button.setEnabled(allow_ops)
+        self.install_reqs_button.setEnabled(allow_ops)
+
+        # build only if idle + requirements OK
+        self.check_requirements()
+        self.build_button.setEnabled((not busy) and self.all_requirements_met)
+
+        if not self.all_requirements_met:
+            self.build_button.setToolTip("Missing required packages (archiso / mkinitcpio-archiso)")
+        else:
+            self.build_button.setToolTip("Build the ISO using mkarchiso")
+
+        if initial:
+            self.open_iso_button.setEnabled(False)
+
+    # ---------------- Helpers ----------------
     def open_iso_folder(self):
-        """Open the output ISO directory in the file manager"""
         try:
-            subprocess.run(["xdg-open", self.OUTPUT_DIR])
+            subprocess.run(["xdg-open", self.OUTPUT_DIR], check=False)
         except Exception as e:
-            self.append_terminal_text(f"Failed to open folder: {e}\n")
+            self.append_terminal_text(f"[{now_ts()}] Failed to open ISO folder: {e}\n")
 
-    def show_error_dialog(self, title, message):
-        """Show an error dialog to alert the user of an issue"""
+    def open_log(self):
+        try:
+            if not os.path.exists(self.LOG_PATH):
+                # create it so file managers open it
+                Path(self.LOG_PATH).touch()
+            subprocess.run(["xdg-open", self.LOG_PATH], check=False)
+        except Exception as e:
+            self.append_terminal_text(f"[{now_ts()}] Failed to open log: {e}\n")
+
+    def show_error(self, title: str, message: str):
         QMessageBox.critical(self, title, message)
 
     def closeEvent(self, event):
-        """Handle application close event"""
-        if self.build_in_progress:
-            reply = QMessageBox.question(self, "Build in Progress", 
-                                       "A build is in progress. Are you sure you want to quit?",
-                                       QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.No:
+        if self.terminal_process.process.state() == QProcess.Running:
+            reply = QMessageBox.question(
+                self, "Process Running",
+                "A process is still running. Quit anyway?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
                 event.ignore()
                 return
-            else:
-                self.terminal_process.terminate()
-                if self.build_timer:
-                    self.build_timer.stop()
+            self.terminal_process.terminate()
         event.accept()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setStyle('Fusion')
-    
-    # Dark palette
+    app.setStyle("Fusion")
+
+    # Dark palette (your original vibe)
     palette = QPalette()
     palette.setColor(QPalette.Window, QColor(53, 53, 53))
     palette.setColor(QPalette.WindowText, Qt.white)
@@ -650,7 +896,6 @@ if __name__ == "__main__":
     palette.setColor(QPalette.HighlightedText, Qt.black)
     app.setPalette(palette)
 
-    # Enhanced stylesheet: clean dark buttons with proper disabled state
     app.setStyleSheet("""
         QToolTip {
             color: #ffffff;
@@ -668,26 +913,32 @@ if __name__ == "__main__":
             padding: 0 3px 0 3px;
             color: white;
         }
-        QPushButton {
+        QPushButton, QToolButton {
             background-color: #2d2d2d;
             border: 1px solid #555555;
-            padding: 5px 10px;
+            padding: 6px 10px;
             color: white;
-            min-width: 80px;
+            min-width: 90px;
         }
-        QPushButton:hover:!pressed {
+        QPushButton:hover:!pressed, QToolButton:hover:!pressed {
             background-color: #3a3a3a;
         }
-        QPushButton:pressed {
+        QPushButton:pressed, QToolButton:pressed {
             background-color: #4a4a4a;
         }
-        QPushButton:disabled {
+        QPushButton:disabled, QToolButton:disabled {
             background-color: #353535;
             color: #606060;
             border: 1px solid #444444;
         }
+        QLineEdit {
+            background-color: #1f1f1f;
+            border: 1px solid #444444;
+            padding: 6px;
+            color: white;
+        }
     """)
 
-    window = ArchIsoBuilder()
-    window.show()
+    w = ArchIsoBuilder()
+    w.show()
     sys.exit(app.exec_())

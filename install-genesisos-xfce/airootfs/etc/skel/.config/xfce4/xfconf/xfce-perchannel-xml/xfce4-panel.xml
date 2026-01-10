@@ -4,20 +4,19 @@
   <property name="configver" type="int" value="2"/>
   <property name="panels" type="array">
     <value type="int" value="1"/>
+    <value type="int" value="2"/>
     <property name="dark-mode" type="bool" value="false"/>
     <property name="panel-1" type="empty">
-      <property name="position" type="string" value="p=6;x=960;y=18"/>
-      <property name="length" type="uint" value="100"/>
+      <property name="position" type="string" value="p=11;x=984;y=18"/>
+      <property name="length" type="double" value="62.760416666666664"/>
       <property name="position-locked" type="bool" value="true"/>
       <property name="icon-size" type="uint" value="0"/>
       <property name="size" type="uint" value="34"/>
       <property name="plugin-ids" type="array">
         <value type="int" value="1"/>
-        <value type="int" value="17"/>
+        <value type="int" value="12"/>
         <value type="int" value="7"/>
-        <value type="int" value="16"/>
         <value type="int" value="2"/>
-        <value type="int" value="19"/>
         <value type="int" value="3"/>
         <value type="int" value="5"/>
         <value type="int" value="18"/>
@@ -27,9 +26,6 @@
         <value type="int" value="15"/>
         <value type="int" value="9"/>
         <value type="int" value="10"/>
-        <value type="int" value="11"/>
-        <value type="int" value="12"/>
-        <value type="int" value="13"/>
         <value type="int" value="14"/>
       </property>
       <property name="background-style" type="uint" value="1"/>
@@ -37,10 +33,29 @@
         <value type="double" value="0"/>
         <value type="double" value="0"/>
         <value type="double" value="0"/>
-        <value type="double" value="0.66329966329966328"/>
+        <value type="double" value="0.75757575757575757"/>
       </property>
       <property name="length-adjust" type="bool" value="true"/>
       <property name="autohide-behavior" type="uint" value="0"/>
+      <property name="enter-opacity" type="uint" value="80"/>
+      <property name="leave-opacity" type="uint" value="80"/>
+    </property>
+    <property name="panel-2" type="empty">
+      <property name="position" type="string" value="p=12;x=910;y=1055"/>
+      <property name="size" type="uint" value="48"/>
+      <property name="length" type="double" value="1"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="background-style" type="uint" value="1"/>
+      <property name="background-rgba" type="array">
+        <value type="double" value="0"/>
+        <value type="double" value="0"/>
+        <value type="double" value="0"/>
+        <value type="double" value="0.75757575757575757"/>
+      </property>
+      <property name="autohide-behavior" type="uint" value="1"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="11"/>
+      </property>
     </property>
   </property>
   <property name="plugins" type="empty">
@@ -139,18 +154,12 @@
       <property name="enable-keyboard-shortcuts" type="empty"/>
       <property name="known-players" type="empty"/>
     </property>
-    <property name="plugin-11" type="string" value="separator">
-      <property name="style" type="uint" value="0"/>
-    </property>
     <property name="plugin-12" type="string" value="clock">
       <property name="digital-format" type="string" value="%T"/>
       <property name="digital-time-format" type="string" value="%I:%M %p"/>
       <property name="digital-layout" type="uint" value="3"/>
       <property name="timezone" type="string" value="EST5EDT"/>
       <property name="digital-time-font" type="string" value="Ubuntu Mono 13"/>
-    </property>
-    <property name="plugin-13" type="string" value="separator">
-      <property name="style" type="uint" value="0"/>
     </property>
     <property name="plugin-14" type="string" value="actions">
       <property name="appearance" type="uint" value="0"/>
@@ -171,21 +180,21 @@
     </property>
     <property name="plugin-4" type="string" value="xfce4-clipman-plugin"/>
     <property name="plugin-15" type="string" value="screenshooter"/>
-    <property name="plugin-17" type="string" value="pager">
-      <property name="rows" type="uint" value="1"/>
-      <property name="miniature-view" type="bool" value="false"/>
-    </property>
-    <property name="plugin-16" type="string" value="launcher">
-      <property name="items" type="array">
-        <value type="string" value="17623789851.desktop"/>
-      </property>
-    </property>
     <property name="plugin-1" type="string" value="whiskermenu">
       <property name="hover-switch-category" type="bool" value="true"/>
       <property name="position-search-alternate" type="bool" value="true"/>
       <property name="button-icon" type="string" value="storm os"/>
       <property name="recent" type="array">
+        <value type="string" value="org.manjaro.pamac.manager.desktop"/>
+        <value type="string" value="gparted.desktop"/>
+        <value type="string" value="mpv.desktop"/>
+        <value type="string" value="firefox.desktop"/>
+        <value type="string" value="browseros.desktop"/>
         <value type="string" value="xfce4-mime-settings.desktop"/>
+        <value type="string" value="xfce4-screenshooter.desktop"/>
+        <value type="string" value="discord.desktop"/>
+        <value type="string" value="thorium-browser.desktop"/>
+        <value type="string" value="xfce4-terminal.desktop"/>
       </property>
     </property>
     <property name="plugin-18" type="string" value="weather">
@@ -227,10 +236,6 @@
         <property name="label1" type="int" value="9"/>
       </property>
     </property>
-    <property name="plugin-19" type="string" value="launcher">
-      <property name="items" type="array">
-        <value type="string" value="17648993901.desktop"/>
-      </property>
-    </property>
+    <property name="plugin-11" type="string" value="docklike"/>
   </property>
 </channel>

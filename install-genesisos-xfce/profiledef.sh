@@ -1,17 +1,20 @@
-#!/bin/bash
-iso_name="GenesisOS"
-iso_label="GENESISOS"
-iso_publisher="GenesisOS Team"
-iso_application="GenesisOS Live/Rescue"
-iso_version="$(date +%Y.%m.%d)"
+#!/usr/bin/env bash
+# shellcheck disable=SC2034
+
+iso_name="TornadoOS"
+iso_label="TornadoOS_Release"
+iso_publisher="TornadoOS"
+iso_application="TornadoOS Install Media"
+iso_version="Jan-Test"
 install_dir="arch"
 buildmodes=('iso')
-
-bootmodes=('bios.syslinux' 'uefi.systemd-boot')
-
+bootmodes=('bios.syslinux'
+           'uefi.grub')
 arch="x86_64"
 pacman_conf="pacman.conf"
 airootfs_image_type="squashfs"
+#airootfs_image_tool_options=('-comp' 'xz' '-Xbcj' 'x86' '-b' '1M' '-Xdict-size' '1M')
+#bootstrap_tarball_compression=('zstd' '-c' '-T0' '--auto-threads=logical' '--long' '-19')
 file_permissions=(
   ["/etc/shadow"]="0:0:400"
   ["/root"]="0:0:750"
@@ -26,20 +29,14 @@ file_permissions=(
   ["/etc/gshadow"]="0:0:400"
   ["/etc/shadow"]="0:0:400"
   ["/usr/local/bin/trust.sh"]="0:0:755"
-  ["/etc/skel/.config/autostart/calamares.desktop"]="0:0:755"
   ["/etc/skel/.config/autostart/NetworkManager.desktop"]="0:0:755"
   ["/etc/skel/.config/autostart/autoi.desktop"]="0:0:755"
-  ["/etc/skel/.config/autostart/welcome.desktop"]="0:0:755"
-  ["/etc/skel/Desktop/calamares.desktop"]="0:0:755"
+  ["/etc/skel/Desktop/installer.desktop"]="0:0:755"
   ["/usr/bin/wifi-connection.sh"]="0:0:755"
   ["/usr/local/bin/fm10"]="0:0:755"
   ["/usr/local/bin/term5"]="0:0:755"
   ["/usr/local/bin/launcher"]="0:0:755"
-  ["/usr/local/bin/hyper8"]="0:0:755"
+  #["/usr/local/bin/hyper8"]="0:0:755"
   ["/usr/local/bin/autoi"]="0:0:755"
-  ["/usr/local/bin/eco_menu"]="0:0:755"
-  ["/usr/local/bin/eco_sys"]="0:0:755"
-  ["/usr/local/bin/eco_rec2"]="0:0:755"
-  ["/usr/local/bin/eco_nvidia"]="0:0:755"
-  ["/usr/local/bin/eco_pac"]="0:0:755"
+  ["/usr/local/bin/installer11"]="0:0:755"
 )

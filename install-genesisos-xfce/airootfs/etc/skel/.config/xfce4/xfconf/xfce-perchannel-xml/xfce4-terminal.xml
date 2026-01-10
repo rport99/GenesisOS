@@ -2,15 +2,15 @@
 
 <channel name="xfce4-terminal" version="1.0">
   <property name="misc-show-unsafe-paste-dialog" type="bool" value="false"/>
-  <property name="misc-default-geometry" type="string" value="95x28"/>
+  <property name="misc-default-geometry" type="string" value="85x30"/>
   <property name="cell-height-scale" type="double" value="1"/>
   <property name="cell-width-scale" type="double" value="1"/>
   <property name="background-mode" type="string" value="TERMINAL_BACKGROUND_TRANSPARENT"/>
   <property name="background-darkness" type="double" value="0.90000000000000002"/>
   <property name="font-name" type="string" value="Ubuntu Mono 16"/>
-  <property name="color-foreground" type="string" value="#5555ffffffff"/>
+  <property name="color-foreground" type="string" value="#3434e2e2e2e2"/>
   <property name="color-use-theme" type="bool" value="false"/>
-  <property name="color-palette" type="string" value="rgb(0,0,0);rgb(170,0,0);rgb(0,170,0);rgb(170,85,0);rgb(85,255,255);rgb(170,0,170);rgb(0,170,170);rgb(170,170,170);rgb(85,85,85);rgb(255,85,85);rgb(85,255,85);rgb(255,255,85);rgb(85,255,255);rgb(85,255,255);rgb(85,255,255);rgb(255,255,255)"/>
+  <property name="color-palette" type="string" value="rgb(10,14,20);rgb(255,85,85);rgb(23,147,209);rgb(252,233,79);rgb(52,226,226);rgb(23,147,209);rgb(0,229,255);rgb(230,230,230);rgb(85,87,83);rgb(239,41,41);rgb(138,226,52);rgb(252,233,79);rgb(52,226,226);rgb(173,127,168);rgb(52,226,226);rgb(238,238,236)"/>
   <property name="tab-activity-color" type="string" value="#aa0000"/>
   <property name="color-bold-is-bright" type="bool" value="true"/>
   <property name="misc-always-show-tabs" type="bool" value="false"/>
@@ -40,12 +40,12 @@
   <property name="misc-right-click-action" type="string" value="TERMINAL_RIGHT_CLICK_ACTION_CONTEXT_MENU"/>
   <property name="scrolling-bar" type="string" value="TERMINAL_SCROLLBAR_NONE"/>
   <property name="scrolling-unlimited" type="bool" value="true"/>
-  <property name="color-background" type="string" value="#000000"/>
+  <property name="color-background" type="string" value="#0A0E14"/>
   <property name="color-background-vary" type="bool" value="false"/>
   <property name="color-cursor-foreground" type="string" value=""/>
-  <property name="color-cursor" type="string" value=""/>
+  <property name="color-cursor" type="string" value="#00E5FF"/>
   <property name="color-cursor-use-default" type="bool" value="true"/>
-  <property name="color-selection" type="string" value=""/>
+  <property name="color-selection" type="string" value="#00E5FF"/>
   <property name="color-selection-background" type="string" value=""/>
   <property name="color-selection-use-default" type="bool" value="true"/>
   <property name="color-bold" type="string" value=""/>

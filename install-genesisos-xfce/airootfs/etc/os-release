@@ -1,9 +1,9 @@
-NAME=GenesisOS
-VERSION="GenesisOS"
-ID=GenesisOS
+NAME=TornadoOS
+VERSION="TornadoOS"
+ID=TornadoOS
 ID_LIKE=arch
 VERSION_ID=21.7
-PRETTY_NAME="GenesisOS"
+PRETTY_NAME="TornadoOS"
 ANSI_COLOR="0;36"
 HOME_URL="https://sourceforge.net/projects/storm-os"
 SUPPORT_URL="https://sourceforge.net/p/storm-os/discussion/"

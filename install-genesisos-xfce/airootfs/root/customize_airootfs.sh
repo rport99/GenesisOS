@@ -1,103 +1,99 @@
 #!/bin/bash
-set -euo pipefail
+ 
+set -e -u
+
 umask 022
 
-# Locale / timezone
 sed -i 's/#\(en_US\.UTF-8\)/\1/' /etc/locale.gen
 locale-gen
+
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 
-# Root account
-usermod -s /usr/bin/bash root || true
-cp -aT /etc/skel/ /root/ || true
-chmod 750 /root || true
-passwd -d root || true
+usermod -s /usr/bin/bash root
+cp -aT /etc/skel/ /root/
+chmod 750 /root
+passwd -d root
 
-# ---- Ensure liveuser exists ----
-if ! id -u liveuser >/dev/null 2>&1; then
-  useradd -m -G "adm,audio,floppy,log,network,rfkill,scanner,storage,optical,power,wheel" -s /bin/bash liveuser
-fi
-
-# Home ownership
-mkdir -p /home/liveuser
+#useradd -m liveuser -u 500 -g users -G "adm,audio,floppy,log,network,rfkill,scanner,storage,optical,power,wheel" -s /bin/bash
+#useradd -m -p "" -G "adm,audio,floppy,log,network,rfkill,scanner,storage,optical,power,wheel" -s /bin/bash liveuser
 chown -R liveuser:liveuser /home/liveuser
 
-# Autologin groups
-getent group autologin >/dev/null 2>&1 || groupadd -r autologin
-getent group nopasswdlogin >/dev/null 2>&1 || groupadd -r nopasswdlogin
-gpasswd -a liveuser autologin || true
-gpasswd -a liveuser nopasswdlogin || true
+#enable autologin
+#groupadd -r autologin
+gpasswd -a liveuser autologin
 
-# Sudo (you probably want NOPASSWD on a live ISO; keep ALL if you prefer)
-if ! grep -qE '^liveuser\s' /etc/sudoers; then
-  echo "liveuser ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+#groupadd -r nopasswdlogin
+gpasswd -a liveuser nopasswdlogin
+
+if ! grep -q "liveuser" /etc/sudoers;  then
+	echo "liveuser ALL=(ALL) ALL" >> /etc/sudoers
 fi
 
-# Enable services (only enable what actually exists)
-for svc in thermald haveged NetworkManager sshd bluetooth lightdm cups; do
-  systemctl enable "${svc}.service" 2>/dev/null || true
-done
-systemctl enable pacman-init.service choose-mirror.service 2>/dev/null || true
-systemctl set-default graphical.target 2>/dev/null || true
+systemctl enable thermald.service
+systemctl enable haveged.service
+systemctl enable NetworkManager.service
+systemctl enable pacman-init.service choose-mirror.service
+systemctl enable sshd.service
+systemctl enable bluetooth.service
+systemctl enable lightdm.service
+systemctl set-default graphical.target
+systemctl enable cups.service
 
-# Permissions
-chmod 750 /etc/sudoers.d || true
-chmod 440 /etc/sudoers.d/g_wheel 2>/dev/null || true
-chown -R root:root /etc/sudoers.d || true
-chmod 755 / || true
+## Fix permissions
+chmod 750 /etc/sudoers.d
+chmod 440 /etc/sudoers.d/g_wheel
+#chmod 644 /etc/systemd/system/*.service
+chown 0 /etc/sudoers.d
+chown 0 /etc/sudoers.d/g_wheel
+chown root:root /etc/sudoers.d
+chown root:root /etc/sudoers.d/g_wheel
+chmod 755 /
 
-# SSH allow root (live env)
-sed -i 's/#\(PermitRootLogin \).\+/\1yes/' /etc/ssh/sshd_config || true
+sed -i 's/#\(PermitRootLogin \).\+/\1yes/' /etc/ssh/sshd_config
+sed -i "s/#Server/Server/g" /etc/pacman.d/mirrorlist
+sed -i 's/#\(Storage=\)auto/\1volatile/' /etc/systemd/journald.conf
 
-# Mirrors / journald / logind tweaks
-sed -i "s/^#Server/Server/g" /etc/pacman.d/mirrorlist || true
-sed -i 's/#\(Storage=\)auto/\1volatile/' /etc/systemd/journald.conf || true
+sed -i 's/#\(HandleSuspendKey=\)suspend/\1ignore/' /etc/systemd/logind.conf
+sed -i 's/#\(HandleHibernateKey=\)hibernate/\1ignore/' /etc/systemd/logind.conf
+sed -i 's/#\(HandleLidSwitch=\)suspend/\1ignore/' /etc/systemd/logind.conf
 
-sed -i 's/#\(HandleSuspendKey=\)suspend/\1ignore/' /etc/systemd/logind.conf || true
-sed -i 's/#\(HandleHibernateKey=\)hibernate/\1ignore/' /etc/systemd/logind.conf || true
-sed -i 's/#\(HandleLidSwitch=\)suspend/\1ignore/' /etc/systemd/logind.conf || true
+## Wifi not available with networkmanager (BugFix)
+su -c 'echo "" >> /etc/NetworkManager/NetworkManager.conf'
+su -c 'echo "[device]" >> /etc/NetworkManager/NetworkManager.conf'
+su -c 'echo "wifi.scan-rand-mac-address=no" >> /etc/NetworkManager.conf'
 
-# ---- NetworkManager config FIX ----
-# you had a typo writing to /etc/NetworkManager.conf
-mkdir -p /etc/NetworkManager
-{
-  echo ""
-  echo "[device]"
-  echo "wifi.scan-rand-mac-address=no"
-} >> /etc/NetworkManager/NetworkManager.conf
-
-# Pacman keys (live ISO)
-pacman-key --init || true
-pacman-key --populate || true
+pacman-key --init
+pacman-key --populate
 
 # Stop lightdm user from expiring
-chage -E -1 lightdm 2>/dev/null || true
+chage -E -1 lightdm
 
-xdg-user-dirs-update --force || true
+#pacman -Rs xfwm4-themes --noconfirm
 
-# Backgrounds
+xdg-user-dirs-update --force
+
+
 mkdir -p /usr/share/backgrounds/xfce
-cp -af /usr/share/backgrounds/*.* /usr/share/backgrounds/xfce 2>/dev/null || true
+cp -af /usr/share/backgrounds/*.* /usr/share/backgrounds/xfce
 
-# tmp ownership
-chown -R liveuser:liveuser /tmp || true
+####
 
-# Plymouth
-plymouth-set-default-theme stormos 2>/dev/null || true
+chown -R liveuser:liveuser /tmp
 
-# Boost symlink (only if both versions are relevant)
-if [[ -e /usr/lib/libboost_python313.so.1.89.0 ]] && [[ ! -e /usr/lib/libboost_python313.so.1.88.0 ]]; then
-  ln -svf /usr/lib/libboost_python313.so.1.89.0 /usr/lib/libboost_python313.so.1.88.0
-fi
+plymouth-set-default-theme stormos
 
-# ---- IMPORTANT: avoid EFI FAT "Disk full" ----
-# Remove fallback initramfs (they bloat efiboot.img)
-rm -f /boot/initramfs-*-fallback.img /boot/*fallback* 2>/dev/null || true
+# Create theme directory
+mkdir -p /usr/share/themes/grub/fonts
 
-# ---- Installer compatibility: provide vmlinuz-linux path ----
-if [[ -e /boot/vmlinuz-linux-zen ]] && [[ ! -e /boot/vmlinuz-linux ]]; then
-  cp -a /boot/vmlinuz-linux-zen /boot/vmlinuz-linux
-fi
-if [[ -e /boot/initramfs-linux-zen.img ]] && [[ ! -e /boot/initramfs-linux.img ]]; then
-  cp -a /boot/initramfs-linux-zen.img /boot/initramfs-linux.img
-fi
+# Copy StormOS theme
+cp -r /usr/share/grub/themes/stormos /usr/share/themes/grub/
+
+# Ensure proper permissions
+chown -R root:root /usr/share/themes/grub
+chmod -R 755 /usr/share/themes/grub
+
+# Apply theme to GRUB by default
+echo "set theme=/usr/share/themes/grub/stormos/theme.txt" > /etc/default/grub
+
+
+ln -svf /usr/lib/libboost_python313.so.1.89.0 /usr/lib/libboost_python313.so.1.88.0
